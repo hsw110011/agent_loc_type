@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Node3CandidateAreas",
+  "description": "Node 3 候选区域识别结果。bbox 为实际 VLM 输入图像上的四个顺时针顶点，支持倾斜矩形或凸四边形；区域内部互不重叠。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "areas"
+  ],
+  "properties": {
+    "areas": {
+      "type": "array",
+      "description": "按 Area_1、Area_2、Area_3 ... 顺序编号的候选区域；未发现候选区域时允许为空数组。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "area_id",
+          "bbox",
+          "scene_description",
+          "selection_reason",
+          "matched_rules"
+        ],
+        "properties": {
+          "area_id": {
+            "type": "string",
+            "pattern": "^Area_[1-9][0-9]*$",
+            "description": "区域 ID，从 Area_1 开始依次编号，不重复。"
+          },
+          "bbox": {
+            "type": "array",
+            "description": "四个顺时针顶点 [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]，原点左上、x向右、y向下；从最上方顶点开始，同高时取最左。优先贴合道路的倾斜矩形，也允许凸四边形；正面积、不自交、不越界，区域之间内部不重叠，边界接触允许。坐标为像素边缘，可使用小数。",
+            "minItems": 4,
+            "maxItems": 4,
+            "items": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          },
+          "scene_description": {
+            "type": "string",
+            "description": "客观描述区域中可见的道路、建筑、植被、阴影、地形线索及空间关系，不得将推断写成已测事实。",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "selection_reason": {
+            "type": "string",
+            "description": "说明选择该区域的理由，包括潜在定位价值或退化风险，明确关联可见的场景特征。",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "matched_rules": {
+            "type": "array",
+            "minItems": 1,
+            "description": "实际支撑选区的规则引用；ID 与名称来自 Rule 的 id/title，不编造、不改写、不重复。程序从 Rule 编译成对枚举。",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "rule_id",
+                "rule_name"
+              ],
+              "properties": {
+                "rule_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "rule_name": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
