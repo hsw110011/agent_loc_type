@@ -1,0 +1,27 @@
+{
+  "repository": "https://github.com/xiaofei-guan/MaGRoad",
+  "main_commit": "765c8786d756e0b63d5385e3ddcc44f05e1dfa5f",
+  "cityspace_commit": "0265667b6ee439762b848d18573f857871864d2e",
+  "files_from": {
+    "upstream_model.py.txt": "main:model.py",
+    "configs/wildroad.yaml": "main:config/toponet_vitb_1024_wild_road.yaml",
+    "configs/globalscale.yaml": "main:config/toponet_vitb_512_globalscale.yaml",
+    "configs/spacenet.yaml": "cityspace:config/toponet_vitb_256_spacenet.yaml",
+    "sam_modeling/image_encoder.py": "main:sam/segment_anything/modeling/image_encoder.py",
+    "sam_modeling/common.py": "main:sam/segment_anything/modeling/common.py",
+    "LICENSE.magroad": "main:LICENSE"
+  },
+  "paper": "https://arxiv.org/abs/2512.10416",
+  "source_hashes": {
+    "LICENSE.magroad": "d659cec6ae9d8606e4f78ffa6b3ed2a9285b7401c81c7ce3bfe024bb184658f7",
+    "LICENSE.segment_anything": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "upstream_model.py.txt": "a05aa43ed8941f0f2e5bbfb12bcfde3255210ecc073c2c84ce965757e114a7ff",
+    "build_inference_model.py": "fb1b622b6fab7bdfb20b9a7ee0fc4d3d2ea85f54291a14c7464195a3473bbf00",
+    "model.py": "0f55fc29249b526fd03d3852c25c646ce7ccfb5c48c9ab11080a9b6585cde623",
+    "configs/wildroad.yaml": "599c4d329684b644d268dea3c233d51fd08c1b4b4a6bfb68cf68521fea19052a",
+    "configs/globalscale.yaml": "946516e540879f4b50ec94eb8cf2a703651572cc6179be8b4efb50a47da82a13",
+    "configs/spacenet.yaml": "b52eee4a13f909840f7c1a4c04ba9c8c4026c56592d3d33017e0b68db86599f8",
+    "sam_modeling/image_encoder.py": "ec9dd904e88c0d8feef5c62d9459fb517036990854ab390a7635e3d9dbed00e4",
+    "sam_modeling/common.py": "59a53bfa5d0a4d446df7f2bb57d2e95808b130601592b934600fb663d256ce17"
+  }
+}

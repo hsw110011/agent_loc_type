@@ -1,0 +1,93 @@
+# Node 9 三种辅助定位方式的适用范围与选择规则。
+# program 一节只由程序读取，不发送给模型：通用限制由程序附加，保证不依赖模型是否写出。
+schema_version: 2
+scope:
+  region: 只有边界线以内是真实融合区域；线外的地物只是环境上下文，不能当作区域内部的证据
+  evidence: 卫星影像只提供环境的间接线索，不能证明任何传感器的实际性能
+  unavailable: 未提供 GPS 状态、传感器能力、高程或深度信息，不得假设
+  comparison: 三种方式只做定性比较，不给出百分比、概率、评分或成功率
+methods:
+  lidar_inertial_slam:
+    name: lio_slam（激光雷达惯性里程计 / SLAM）
+    priority: P0
+    suitable:
+    - 道路附近有多处可能被车端观测的稳定结构，例如不同朝向的墙面、建筑拐角、路口或挡墙转折；关注这些结构沿路线是否有变化
+    - 住宅区若有分布清楚的建筑边缘、围墙转角和路口，即使有局部树冠，也可优先考虑
+    caution:
+    - 多排相似住宅、长直走廊或隧道内重复断面可能缺少沿行驶方向的约束
+    - 卫星图可见的屋顶、平面标线或树冠只能提供环境线索；树冠随季节和风变化，不能单靠树冠确认车端有稳定几何
+    meaning: 有条件提供局部几何约束，实际可见性、匹配质量和短时精度需验证
+  wheel_imu_odometry:
+    name: wheel_io（轮速计与 IMU 融合里程计）
+    priority: P0
+    suitable:
+    - 可辨认连续可通行路带，周边稳定几何稀少或重复，且当前区域适合作为短段过渡
+    - 有入口和路带接续线索的疑似隧道、桥下短段，或缺少路侧结构的连续硬化广场
+    caution:
+    - 隧道口只确认入口线索，图中看不到的内部结构和长度须留作未知；有可辨稳定结构时仍须比较 lio_slam
+    - 只延续入段前已有的位姿。实际附着和轮速打滑要在线核实
+    - 区域跨度大或可见路带断续时，不假定整段可由轮速短时过渡
+    meaning: 短时相对定位，误差随行驶累积，条件恢复后需用可靠观测校正
+  gps:
+    name: GPS（卫星定位）
+    priority: P1
+    suitable:
+    - 两种 P0 均缺乏适用依据，且目标路线沿途有连续开阔的天空视野线索
+    - 从可见布局看，沿途没有靠近道路的高大建筑、连续树冠、桥面或洞口等明显遮挡或反射线索
+    caution:
+    - 路边建筑的邻近程度和布局比只看有没有高楼更有用；局部开口不足以代表整段路线开阔
+    - 卫星图无法确认实时卫星分布、遮挡、反射和信号质量
+    meaning: 在 P0 均不适用时，作为有开阔环境证据支持的候选，需验证实时信号
+selection:
+  same_level:
+    principle: P0 的 lio_slam 和 wheel_io 同级比较。先分别看目标路段是否满足各自条件，再选择证据更充分的一项。
+    lidar_inertial_slam: 路侧稳定几何清楚、布局多样且沿路可区分时，优先用几何约束维持局部定位。
+    wheel_imu_odometry: 几何稀少或重复，但可辨认连续可通行路带且适合短时通过时，用轮速与 IMU 延续位姿。
+  last_resort:
+    method: gps
+    when: 仅当两种 P0 对当前路段都不适用，且草原、广场或大片开阔农田等场景有沿路线持续开阔的证据时，才考虑 GPS。
+  gates:
+  - 沿目标路带有连续树冠、桥面、洞口或近路建筑形成明显遮挡或反射风险时，不能选择 gps。
+  - 不能以没有高楼、属于郊区或看不出遮挡作为 gps 的唯一依据。低矮建筑或零散树木是否相关，要看它们与路带的位置关系。
+  - 只有树冠、屋顶或单一重复结构时，不能据此确认 lio_slam 具备充分的三维约束。
+  - 仅在有具体环境证据说明两项 P0 都不适用时，才能降到 P1。
+  ambiguous: 三项都缺少充分依据时，仍给出有相对依据的暂定选择；GPS 开阔条件无法确认时，在两项 P0 中比较。标记 requires_validation 和 review_required=true，写明缺失条件。
+  consistency: reason 只使用已记录的 visual_evidence，说明选中项为何适用和另外两项为何不优先；区分实际观察与由图像推测的可用性。
+assessment:
+  p0: 对 lio_slam 和 wheel_io 分别填写 suitable（有明确适用依据）、unsuitable（有具体不适用依据）或 uncertain（依据不足或冲突）。
+  sky_view: 沿目标路线持续开阔填 open；有明显遮挡填 obstructed；仅局部可见或难以判定填 uncertain。
+  obstruction_or_reflection: 明显遮挡或反射风险线索为 present；沿路线有足够图像依据排除明显线索为 absent；其余填 uncertain。
+  gps: 两项 P0 均为 unsuitable、sky_view 为 open、obstruction_or_reflection 为 absent 才能选 GPS。
+  fallback: 选中的 P0 评为 uncertain 或 unsuitable 时，必须填 requires_validation、review_required=true。另一项 P0 为 suitable 时优先选它。
+status:
+  provisional: 图像证据较明确地支持该方式且无明显冲突；仍是基于环境的暂定推荐
+  requires_validation: 证据不足、多种方式都缺少充分依据，或关键依据主要来自间接线索，必须在线验证
+review_required: 真实融合区域内环境明显混合、证据互相冲突或难以确定单一方案时为 true
+program:
+  always_requires_validation:
+  - wheel_imu_odometry
+  mandatory_limitations:
+    gps:
+    - 卫星影像无法提供卫星数、DOP、信噪比、定位误差或实时可用性，选择 GPS 只代表场景可能适合，需验证实时信号质量
+    lidar_inertial_slam:
+    - 卫星影像只提供三维结构的间接线索，需确认车载 LiDAR 实际能观测到相应结构，并在线验证匹配约束是否充分
+    wheel_imu_odometry:
+    - 该方式为递推式相对定位，误差随时间和距离累积，只能作为短时过渡，不能长期独立运行
+    - 条件恢复后需要重新获得全局位置校正
+    - 实际可用性受轮胎打滑、传感器偏置、路面情况和运行距离影响，需在线验证
+  overclaim_phrases:
+  - 保证定位
+  - 确保定位
+  - 定位一定
+  - 一定可靠
+  - 绝对可靠
+  - 完全可靠
+  - 必定可靠
+  - 不会漂移
+  - 无漂移
+  - 穿透树冠
+  negations: 不无未难没非
+  reliability_number_patterns:
+  - '\d+(?:\.\d+)?\s*[%％]'
+  - '百分之'
+  - '(?:置信度|概率|成功率|适用性|可靠性|准确率|得分|评分)[^，。；]{0,8}\d'

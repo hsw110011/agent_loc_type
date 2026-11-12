@@ -1,0 +1,383 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "semantic 结构风险观察输出 v10",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "block_id",
+    "review_type",
+    "observations",
+    "schema_version",
+    "drivable_check",
+    "data_check",
+    "degradation_check"
+  ],
+  "properties": {
+    "block_id": {
+      "type": "string",
+      "description": "原样返回，每次请求绑定常量"
+    },
+    "review_type": {
+      "type": "string",
+      "const": "semantic"
+    },
+    "observations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rgb",
+        "semantic",
+        "context"
+      ],
+      "properties": {
+        "rgb": {
+          "type": "string",
+          "minLength": 1,
+          "description": "第 1 张局部 RGB 中可见的真实地物、路面和遮挡"
+        },
+        "semantic": {
+          "type": "string",
+          "minLength": 1,
+          "description": "第 2 张局部语义图各类别颜色的位置和空间分布"
+        },
+        "context": {
+          "type": "string",
+          "minLength": 1,
+          "description": "第 3 张整体语义上下文：道路在黄框外的走向、衔接和周边结构"
+        }
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "const": 10
+    },
+    "drivable_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence",
+        "area_type",
+        "area_type_confidence",
+        "uncertainty"
+      ],
+      "properties": {
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "description": "本项可见证据及其位置"
+        },
+        "area_type": {
+          "type": "string",
+          "enum": [
+            "道路",
+            "铺装广场",
+            "停车场或硬化场院",
+            "未铺装便道或压实土场",
+            "不可通行",
+            "未知"
+          ],
+          "description": "地面类型；无法确认用 未知"
+        },
+        "area_type_confidence": {
+          "type": "string",
+          "enum": [
+            "高",
+            "中",
+            "低"
+          ],
+          "description": "area_type 的独立置信度；低 时程序将该字段视为 未知"
+        },
+        "uncertainty": {
+          "type": "string",
+          "minLength": 1,
+          "description": "本项无法确认的因素；没有写“无”"
+        }
+      }
+    },
+    "data_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence",
+        "status",
+        "data_confidence",
+        "uncertainty"
+      ],
+      "properties": {
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "description": "本项可见证据及其位置"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "可用",
+            "局部受限",
+            "不可用",
+            "不确定"
+          ],
+          "description": "专题图是否足以判断结构，见 Rule data"
+        },
+        "data_confidence": {
+          "type": "string",
+          "enum": [
+            "高",
+            "中",
+            "低"
+          ],
+          "description": "data_status 的独立置信度；低 表示不足以确定"
+        },
+        "uncertainty": {
+          "type": "string",
+          "minLength": 1,
+          "description": "本项无法确认的因素；没有写“无”"
+        }
+      }
+    },
+    "degradation_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence",
+        "dominant_class",
+        "dominance",
+        "dominance_confidence",
+        "road_boundary",
+        "road_boundary_confidence",
+        "road_intrusion",
+        "road_intrusion_confidence",
+        "road_geometry",
+        "road_geometry_confidence",
+        "longitudinal_structure",
+        "longitudinal_structure_confidence",
+        "uncertainty",
+        "road_comparisons",
+        "longitudinal_comparisons",
+        "verdict"
+      ],
+      "properties": {
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "description": "本项可见证据及其位置"
+        },
+        "dominant_class": {
+          "type": "string",
+          "enum": [
+            "道路",
+            "建筑",
+            "植被",
+            "混合",
+            "不确定"
+          ],
+          "description": "面积占优的类别"
+        },
+        "dominance": {
+          "type": "string",
+          "enum": [
+            "明显占优",
+            "无单类明显占优",
+            "不确定"
+          ],
+          "description": "单类大面积占优程度，结合实际占比和分布"
+        },
+        "dominance_confidence": {
+          "type": "string",
+          "enum": [
+            "高",
+            "中",
+            "低"
+          ],
+          "description": "dominance 的独立置信度；低 时程序将该字段视为 不确定"
+        },
+        "road_boundary": {
+          "type": "string",
+          "enum": [
+            "清晰",
+            "模糊",
+            "消失",
+            "不确定"
+          ],
+          "description": "道路与其它类别的边界清晰度"
+        },
+        "road_boundary_confidence": {
+          "type": "string",
+          "enum": [
+            "高",
+            "中",
+            "低"
+          ],
+          "description": "road_boundary 的独立置信度；低 时程序将该字段视为 不确定"
+        },
+        "road_intrusion": {
+          "type": "string",
+          "enum": [
+            "存在",
+            "无",
+            "不确定"
+          ],
+          "description": "其它类别是否明确侵入道路，须有道路位置证据"
+        },
+        "road_intrusion_confidence": {
+          "type": "string",
+          "enum": [
+            "高",
+            "中",
+            "低"
+          ],
+          "description": "road_intrusion 的独立置信度；低 时程序将该字段视为 不确定"
+        },
+        "road_geometry": {
+          "type": "string",
+          "enum": [
+            "明显直线",
+            "非直线",
+            "不适用",
+            "不确定"
+          ],
+          "description": "RGB 道路几何；以 RGB 可见路带为准，可参考上下文图的道路走向，见 Rule"
+        },
+        "road_geometry_confidence": {
+          "type": "string",
+          "enum": [
+            "高",
+            "中",
+            "低"
+          ],
+          "description": "road_geometry 的独立置信度；低 时程序将该字段视为 不确定"
+        },
+        "longitudinal_structure": {
+          "type": "string",
+          "enum": [
+            "重复",
+            "有变化",
+            "不适用",
+            "不确定"
+          ],
+          "description": "沿道路方向的语义类别排列是否重复"
+        },
+        "longitudinal_structure_confidence": {
+          "type": "string",
+          "enum": [
+            "高",
+            "中",
+            "低"
+          ],
+          "description": "longitudinal_structure 的独立置信度；低 时程序将该字段视为 不确定"
+        },
+        "uncertainty": {
+          "type": "string",
+          "minLength": 1,
+          "description": "本项无法确认的因素；没有写“无”"
+        },
+        "road_comparisons": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "position",
+              "rgb_basis",
+              "rgb_evidence",
+              "semantic_road"
+            ],
+            "properties": {
+              "position": {
+                "type": "string",
+                "minLength": 1
+              },
+              "rgb_basis": {
+                "type": "string",
+                "enum": [
+                  "直接可见",
+                  "推断延续",
+                  "无法确认"
+                ]
+              },
+              "rgb_evidence": {
+                "type": "string",
+                "minLength": 1
+              },
+              "semantic_road": {
+                "type": "string",
+                "enum": [
+                  "完整",
+                  "变窄",
+                  "断开",
+                  "缺失",
+                  "无法判读"
+                ]
+              }
+            }
+          }
+        },
+        "longitudinal_comparisons": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "position",
+              "observation"
+            ],
+            "properties": {
+              "position": {
+                "type": "string",
+                "minLength": 1
+              },
+              "observation": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "verdict": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "evidence_refs",
+            "reason"
+          ],
+          "properties": {
+            "result": {
+              "type": "string",
+              "enum": [
+                "退化",
+                "纵向退化",
+                "不退化",
+                "证据不足"
+              ]
+            },
+            "evidence_refs": {
+              "type": "array",
+              "uniqueItems": true,
+              "maxItems": 7,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "R1",
+                  "R2",
+                  "R3",
+                  "E",
+                  "A1",
+                  "A2",
+                  "N"
+                ]
+              }
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    }
+  }
+}

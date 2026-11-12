@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "退化区域尺寸扩展输出 v4",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["block_id", "review_type", "schema_version", "tiers"],
+  "properties": {
+    "block_id": {"type": "string", "description": "原样返回，每次请求绑定常量"},
+    "review_type": {"type": "string", "enum": ["semantic", "height"], "description": "每次请求绑定常量"},
+    "schema_version": {"type": "integer", "const": 4},
+    "tiers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {},
+      "description": "每次请求按有效档位绑定为 size_<米> 字段，顺序由小到大"
+    }
+  },
+  "$defs": {
+    "tier": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "单档观察；请求时在 new_ring 与 evidence 之间插入 Node 6 同支路的 data_check 及结构字段",
+      "required": ["size_m", "new_ring", "evidence"],
+      "properties": {
+        "size_m": {"type": "integer", "description": "每次请求绑定为该档尺寸"},
+        "new_ring": {"type": "string", "minLength": 1, "description": "新增环带实际看到什么"},
+        "evidence": {"type": "string", "minLength": 1, "description": "新增范围出现了什么及其对当前窗口判断的影响"}
+      }
+    }
+  }
+}

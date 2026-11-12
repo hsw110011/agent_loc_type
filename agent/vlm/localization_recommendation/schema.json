@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "退化区域辅助定位方式推荐输出 v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["region_id", "visual_evidence", "assessment", "recommended_method", "reason", "limitations", "recommendation_status", "review_required"],
+  "properties": {
+    "region_id": {"type": "string", "description": "原样返回，每次请求绑定常量"},
+    "visual_evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 6,
+      "items": {"type": "string", "minLength": 1, "maxLength": 120},
+      "description": "卫星图中实际可观察到的环境证据，先于结论生成"
+    },
+    "assessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lidar_inertial_slam", "wheel_imu_odometry", "sky_view", "obstruction_or_reflection"],
+      "properties": {
+        "lidar_inertial_slam": {"type": "string", "enum": ["suitable", "unsuitable", "uncertain"]},
+        "wheel_imu_odometry": {"type": "string", "enum": ["suitable", "unsuitable", "uncertain"]},
+        "sky_view": {"type": "string", "enum": ["open", "obstructed", "uncertain"], "description": "目标路线沿途是否有持续开阔的图像线索"},
+        "obstruction_or_reflection": {"type": "string", "enum": ["absent", "present", "uncertain"], "description": "目标路线沿途是否可见明显遮挡或反射风险线索"}
+      }
+    },
+    "recommended_method": {"type": "string", "enum": ["lidar_inertial_slam", "wheel_imu_odometry", "gps"]},
+    "reason": {"type": "string", "minLength": 1, "maxLength": 300, "description": "推荐依据，以及为什么优先于另外两种方式"},
+    "limitations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "items": {"type": "string", "minLength": 1, "maxLength": 120},
+      "description": "本区域特有的风险和待验证条件"
+    },
+    "recommendation_status": {"type": "string", "enum": ["provisional", "requires_validation"]},
+    "review_required": {"type": "boolean", "description": "区域环境混合、证据冲突或难以确定单一方案时为 true"}
+  }
+}

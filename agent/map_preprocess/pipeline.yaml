@@ -1,0 +1,205 @@
+# 流程配置：agent/run_agent.sh --image <图片> 默认读取本文件，全部参数都在这里（感知模型参数在 agent/perception_tools.yaml）。
+#
+# ===== 运行到哪个节点 =====
+# 只保留一行不注释，流程跑到该节点为止；全部注释等于跑完整流程。
+# run_until: extract_road_graph        # Node 2：MaGRoad 道路提取
+# run_until: clean_road_graph          # Node 3：道路拓扑
+# run_until: build_blocks_and_groups   # Node 4：布块与去重
+# run_until: compute_block_features    # Node 5：块级语义/高度指标（需要 GPU）
+# run_until: vlm_review_blocks         # Node 6：VLM 退化复核
+# run_until: vlm_expand_blocks         # Node 7：VLM 退化扩展
+# run_until: fuse_degraded_patches     # Node 8：退化区域空间融合
+run_until: recommend_localization      # Node 9：VLM 辅助定位方式推荐（完整流程）
+
+# Node 1b 本地 VLM 看整图判断道路结构 → 非结构化用 WildRoad 官方权重，结构化用 Global-Scale（ITSC 0.18 / ROAD 0.18 / TOPO 0.455，TOPO 为官方值，过低会产生假连接；ROAD 到 0.25 路网开始断裂）。
+# 超过 max_tile_pixels 的原图（汨罗、河西）按权重训练 GSD 降采样读取。
+workflow: global_blocks
+segmenter: magroad_scene
+output_dir: output/map_preprocess/global_blocks
+tile_grid: 3
+# KITTI GeoTIFF 约 1.48 亿像元；原始全图 RGB + 有效掩码需足够内存。
+max_tile_pixels: 160000000
+cache_enabled: true
+cache_dir: output/map_preprocess/cache
+# 小 Patch（75 m × 75 m）：Node 4 布块、Node 5 指标、Node 6 复核的基准尺寸；指标在原图分辨率上计算。
+block_size_m: 75
+# 跨边去重；关闭时保留各边独立布出的全部框。
+dedup_enabled: true
+# walk：剪除高重叠且无独占道路覆盖的初始框；greedy：独立候选全局贪心覆盖。
+dedup_method: walk
+dedup_candidate_spacing_m: 10
+road_sample_spacing_m: 1
+min_road_coverage: 0.995  # greedy 模式的采样覆盖目标
+# 沿道路弧长预留 5% 重叠：75 m 的步长为 71.25 m，横向直路上框宽重叠 3.75 m。
+block_overlap_ratio: 0.05
+blocks_per_group: 3
+group_overlap_blocks: 1
+long_edge_strategy: split_continuous
+context_size_m: 300
+max_blocks_total: null
+branch_review_enabled: false
+# 掩码拓扑：开启时用下面 road_topo 一节生成路网；改成 false 回退旧清洗流程
+road_topo_enabled: true
+# 优先读 GeoTIFF；普通图片应提供真实 zoom/center_lat，缺失时警告后使用此假设。
+fallback_resolution_m_per_px: 1.0
+block_features_enabled: true      # Node 5
+scene_vlm_reasoning_effort: medium  # Node 1b，仅未知场景调用 VLM
+scene_vlm_thinking_budget: 2048     # 思考 token 上限；0 关闭思考
+vlm_review_enabled: true          # Node 6，依赖 Node 5
+vlm_review_reasoning_effort: medium  # Qwen 模板思考档位：low / medium / xhigh
+vlm_review_thinking_budget: 2048     # 思考 token 上限；0 关闭思考
+vlm_review_height_context_m: 100  # Node 6 高度复核：整体 RGB 上下文及参考高程范围（米）
+vlm_review_dsm_ref_percentile: 20 # 参考高程 = 上述范围内有效 DSM 的第 20 百分位（只是着色基准）
+vlm_review_dsm_range_m: [-2, 8]   # DSM − 参考高程的固定线性色标（米，Viridis），所有块同一色标；按汨罗实测分布取，饱和多时再调
+vlm_expansion_enabled: true       # Node 7，依赖 Node 6
+vlm_expansion_reasoning_effort: medium
+vlm_expansion_thinking_budget: 2048
+vlm_expansion_sizes_m: [100]      # Node 7 大 Patch（100 m × 100 m），须大于 block_size_m
+degradation_fusion_enabled: true  # Node 8，依赖 Node 7
+vlm_localization_enabled: true    # Node 9，依赖 Node 8
+vlm_localization_reasoning_effort: medium
+vlm_localization_thinking_budget: 2048
+
+perception_config: agent/perception_tools.yaml
+magroad_wild_checkpoint: wildroad
+magroad_urban_checkpoint: globalscale:ITSC=0.18,ROAD=0.18,TOPO=0.455
+# wild/urban：跳过 VLM 直接指定；null = VLM 判断
+scene_type_override: null
+# 已确认的图不调用 VLM。先查图片名，再查去掉 _dom 的名字；键不含扩展名。
+scene_type_known:
+  miluo_dom: wild
+  bt_dom: wild
+  hexi_dom: urban
+  kitti_0930_0033: urban
+  kitti_1003_0027: urban
+  kitti_1003_0034: urban
+# VLM 失败、判“不确定”或置信度低时使用
+scene_type_fallback: wild
+
+# ===== 道路拓扑参数（Node 3）：MaGRoad 概率 + 语义分割生成路网 =====
+road_topo:
+
+  classes:             # SegEarth 语义 mask：0=道路、1=建筑、2=植被（含裸地、草地、耕地）、255=无效
+    road_id: 0
+    traversable_ids: [2]
+    impassable_ids: [1]
+    parking_ids: []    # 当前语义模型没有停车场类
+    nodata_id: 255
+
+  steps:               # 每一步的开关
+    preprocess: true
+    fuse: true
+    occlusion: true
+    fill_holes: true
+    smooth_mask: true
+    area_regions: true
+    prune_spurs: true
+    prune_low_confidence: true
+    prune_area: true
+    prune_cycles: true
+    prune_isolated: true
+    merge_junctions: true
+    narrow_loops: true
+    double_nodes: true
+    regularize_junctions: true
+    bridge_gaps: true
+    connect_ends: true      # 路端接主路，参数用 gap 一节
+    straighten_smooth: true
+    refine_curvature: true
+
+  preprocess:
+    road_thresh: 0.18  # MaGRoad 概率上采样到原图后的二值化阈值，输入是二值图时不生效
+    close_m: 3.0
+    min_area_m2: 100.0
+
+  fusion:
+    elongation_ratio: 3.0            # r_only 块的长宽比下限
+    elongation_min_skeleton_m: 20.0  # 或骨架长度下限
+    source_tolerance_m: 1.0          # 点离 core 不超过该距离算 core
+
+  occlusion:
+    max_gap_m: 30.0
+    max_angle_deg: 30.0
+    min_traversable: 0.7   # 缝隙里可穿越类的比例下限
+    tail_m: 10.0           # 拟合路端方向所用的长度
+    min_width_m: 4.0       # 补路的最小笔宽
+
+  area:
+    max_road_width_m: 30.0
+
+  cleanup:
+    hole_m2: 100.0
+    smooth_m: 2.0          # 开闭运算核的大小
+
+  prune:
+    rounds: 5
+    spur_min_m: 12.0
+    spur_width_factor: 1.5
+    filled_min_m: 25.0
+    min_cycle_m: 40.0
+    min_component_m: 50.0
+
+  junction:
+    merge_m: 9.0
+    double_node_m: 12.0
+    skip_m: 8.0
+    fit_span_m: 20.0
+    collinear_deg: 35.0
+    extend_max_m: 25.0
+    on_line_m: 1.0         # 主路点离拟合直线不超过该距离算回到直线上
+    self_loop_min_m: 80.0  # 合并路口时，簇内短于该长度的绕行边并入节点
+
+  loop:
+    narrow_width_m: 15.0         # 环的宽度小于该值、且长宽比够大时算窄长环
+    min_elongation: 4.0
+    parallel_length_ratio: 1.3   # 两条平行边长度相近时合并成中线，否则保留短的
+
+  gap:
+    max_m: 30.0
+    max_angle_deg: 30.0
+    tail_m: 10.0
+    long_max_m: 80.0         # 方向几乎正对时放宽到的距离
+    long_max_angle_deg: 10.0
+    long_tail_m: 20.0        # 判断长距离断口时拟合方向所用的长度
+
+  smooth:
+    simplify_m: 1.5
+    straight_tol_m: 2.0
+    chaikin_iterations: 3
+    resample_m: 2.0
+    max_deviation_m: 3.0
+
+  refine:                 # 最后一步：直线段 + 圆角
+    straight_tol_m: 2.0   # 拟合直线段的容差
+    fillet_m: 15.0        # 拐角两侧各用多长做圆弧过渡
+    min_turn_deg: 3.0     # 转角小于该值不倒圆
+    resample_m: 2.0
+    max_deviation_m: 3.0  # 相对平滑前路径的最大偏差
+
+  vis:
+    max_px: 2000
+
+# ===== 旧清洗流程的参数：只有 road_topo_enabled 改成 false 时才生效 =====
+road_through_only: true
+road_border_margin_m: 10
+road_close_node_dist_m: 16
+small_cycle_max_length_m: 120
+# 两条边首尾相同时，沿线模型道路概率 >= 0.18 的长度不足 60% 的边删除，最强的一条始终保留。
+road_duplicate_prob: 0.18
+road_duplicate_min_support: 0.6
+# 支路贴着干路走到路口的长度不小于 12 m 时，在真实分岔处建节点，重合段只留一条。
+road_shared_min_length_m: 12
+# 每个节点最多连 4 条路，超过时拆成相距 10 m 的两个节点。
+road_max_shared_gap_m: 10
+road_max_node_degree: 4
+# MaGRoad 为主路网，概率骨架只补它漏掉的路：长度 >= 40 m、概率强、不压建筑、两端能接入路网。
+road_skeleton_fill_min_length_m: 40
+# 内部路面占比 >= 60%、周长不超过 300 m 的环是宽路口网格或分隔带双线：紧凑的收成一个路口，细长的去掉一条边。
+road_paved_ring_min_road: 0.6
+road_paved_ring_max_perimeter_m: 300
+# 路线：拓扑定稿后优先沿模型概率脊线走，概率弱或断开处用 SegEarth-OV3 道路类补，连接关系不变；路线离原线最多 25 m，路口吸附半径 8 m（宽路上随半宽放大，最多 15 m）。
+road_semantic_route_enabled: true
+road_semantic_route_corridor_m: 25
+road_semantic_route_node_snap_m: 8
+# 曲率平滑 sigma（米）：同一条路穿过路口时连成整条路线平滑，切向在节点处连续。
+road_smooth_sigma_m: 10

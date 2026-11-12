@@ -1,0 +1,18 @@
+# 感知工具配置。语义分割固定用 SegEarth-OV3（语义路线、Node 5/6/7 和 run_perception 共用）。
+depth:
+  weights_dir: percection_tool/depth_anything/weights/depth_anything_v2_large
+  device: auto
+  input_size: 518
+  min_free_memory_mib: 3072
+  max_input_pixels: 16000000
+  max_processed_pixels: 4194304
+  threads: 4
+segearth_ov3:
+  weights_dir: percection_tool/segearth_ov3/weights
+  device: auto
+  tile_size: 1600
+  stride: 1200
+  score_threshold: 0.1
+  min_free_memory_mib: 16384
+  max_input_pixels: 16000000
+  threads: 4

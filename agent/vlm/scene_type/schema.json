@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "整图道路结构类型",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "observations", "scene_type", "scene_type_confidence", "evidence"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 2},
+    "observations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["road_surface", "road_layout", "building_density", "land_cover"],
+      "properties": {
+        "road_surface": {"type": "string", "enum": ["铺装为主", "土路碎石为主", "混合", "不确定"]},
+        "road_layout": {"type": "string", "enum": ["规整连通路网", "稀疏不规则", "混合", "不确定"]},
+        "building_density": {"type": "string", "enum": ["成片密集", "零散稀疏", "几乎没有", "不确定"]},
+        "land_cover": {"type": "string", "enum": ["建成区为主", "植被裸土水体为主", "混合", "不确定"]}
+      }
+    },
+    "scene_type": {"type": "string", "enum": ["非结构化", "结构化", "不确定"]},
+    "scene_type_confidence": {"type": "string", "enum": ["高", "中", "低"]},
+    "evidence": {"type": "string", "minLength": 1, "maxLength": 300}
+  }
+}

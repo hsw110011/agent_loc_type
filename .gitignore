@@ -4,7 +4,7 @@ data/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
-qwen_3.5_9b/
+qwen3827b-exl3-dflash2/
 
 node_modules/
 .playwright-mcp/
@@ -26,3 +26,12 @@ venv/
 /vlm/runtime/
 .DS_Store
 *.pyc
+
+# Unified generated artifacts and perception checkpoints
+/output/
+/percection_tool/sam_road/weights/
+/percection_tool/pathfinder/weights/
+/percection_tool/depth_anything/weights/
+/percection_tool/semantic_segmentation/weights/
+/percection_tool/magroad/weights/
+/percection_tool/segearth_ov3/weights/

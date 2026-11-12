@@ -1,0 +1,234 @@
+# 执行顺序：preprocess → consistency_checks（局部屏蔽）→ degradation_decision。
+# when 的不同字段为 AND，同一字段列表为 OR；degradation_decision 首条命中决定最终结论，一致性约束同时检查。
+# candidate_reasons 是候选；matched_reasons 仅记录最终确认的退化原因。
+review_type: height
+schema_version: 11
+scale: 根据本次图像说明的实际覆盖宽高，将图中相对距离换算为米；以图像说明给出的中心位置为观察中心，不默认图像正中
+drivable:
+  object: 区域中心约 10 m 内与道路方向相符的地面，中心位置允许有小幅偏移
+  area_types:
+    道路: 线状道路、路口、桥面、土路；被遮挡但有可靠两端延续的道路
+    铺装广场: 铺装广场
+    停车场或硬化场院: 停车场、硬化场院、厂区空地
+    未铺装便道或压实土场: 施工便道、车辙、压实土场
+    不可通行: RGB 有明确正证据，能确认中心约 10 m 内及沿线为不可行驶地面，例如可辨认的屋顶、水面、农田、林地地面或沟渠
+    未知: 遮挡、模糊或证据冲突，无法确认地面类型
+  cautions:
+  - 优先用 RGB 地面证据，不能把专题图的颜色直接当成道路
+  - 广场、停车场、场院不因缺少线状道路而判不可行驶
+  - 树冠或阴影遮住地面时，检查中心附近及遮挡两端是否有可可靠接续的路面；能接续可判道路，无法确认则选 未知
+  - 看不到路面、语义图全绿、中心位置落在树冠上，都不能证明地面不可通行；仍可能有遮挡道路时选 未知
+confidence:
+  levels:
+    高: 本项关键证据清楚，结论由可见事实支持
+    中: 存在局部缺失或遮挡，但不影响本项主要判断
+    低: 本项关键证据不足、冲突或只能猜测
+  fields: 每个判定字段单独输出置信度，命名为 <字段名>_confidence（如 area_type_confidence、road_geometry_confidence）；data_status 的置信度沿用 data_confidence
+uncertainty: 每项单独说明无法确认的部分；没有则写“无”
+drivable_result:
+  道路: true
+  铺装广场: true
+  停车场或硬化场院: true
+  未铺装便道或压实土场: true
+  不可通行: false
+  未知: null
+data:
+  object: 相对高度图是否足以判断区域内的高度结构
+  status:
+    可用: 关键区域有有效高度颜色，两图位置对应，无明显妨碍判读的异常
+    局部受限: 局部无数据或疑似异常，但关键结构仍可判断
+    不可用: 关键区域大面积缺失或明显错位等，无法判断高度结构
+    不确定: 异常原因或影响范围无法确认
+  cautions:
+  - 疑似 DSM 异常应说明视觉证据，不能直接判为不退化
+  - 中心位置可疑、颜色整体偏向色带一端，均不能单独证明数据错误
+  - 数据质量仅影响高度结论，不替代 RGB 的地面判断
+degradation:
+  object: 可通行区域周围的明显高出结构是否足以支持当前区域的高程匹配；同时考虑整幅输入图中的面积与分布
+  questions:
+    road_and_surroundings: 路面在哪里、对应 DSM 颜色如何？哪些路侧结构明显更高，轮廓是否清楚、分布是否充分？这项证据用于 relief、raised_structure 和 height_distinctiveness。
+    along_road: 道路几何如何？比较至少两处沿路位置，说明两侧高低轮廓和排列是重复还是有变化。这项证据用于 road_geometry 和 longitudinal_structure。
+    overhead_occlusion: RGB 与 DSM 的同位置对照是否显示树冠、桥面等可能遮住下层路带？写出位置及表面线索；这项只用于记录风险。
+  answers: 将三项证据分别填入 height_comparisons；无法判断时说明缺失的对照，非线状地面则说明沿路比较为何不适用。
+  image_evidence:
+    raised: 相对周围可通行地面明显高出的结构（建筑、墙体、树冠、边坡等）；颜色与高低的对应按本次图像说明的色带或分段读取
+    low_band: 色带中段颜色相近可作为高差较小的线索；同为深紫或亮黄色可能是端点饱和，不能用同色证明同高、平坦或重复。若无其它独立证据，相关字段填不确定，结论填证据不足。
+    lower: 明显低于周围可通行地面的区域；图中高度参照只是着色基准，不能直接当作低于中心道路的固定高差
+    missing: 无数据区域（颜色见本次图像说明），不算平坦、低处或缺少高出结构的有效证据
+    rgb: 辅助识别建筑、植被、山坡、高架桥及可通行区域；对应高度以同位置 DSM 颜色为准
+  relief:
+    note: 仅用于记录和解释，不参与 degradation_decision
+    平坦: 图中高度颜色相近，起伏不明显
+    局部起伏: 有局部起伏，但区域整体变化较少
+    起伏多样: 多处存在可辨的起伏分布
+    不确定: 无法可靠判断
+  raised_structure:
+    清晰: 明显高出结构轮廓清楚；只描述清晰程度，不代表面积或分布充分
+    较弱: 可见高出结构，但轮廓模糊或破碎
+    无明显高出结构: 有效区域内未见明显高出结构
+    不确定: 关键区域缺失或证据冲突，不能判断高出结构
+  height_distinctiveness:
+    高: 可通行区域周围有清楚且分布充分的明显高出结构，明显高出结构并非仅占整幅图一小点，能提供当前区域的高度参照
+    低: 明显高出结构仅占整幅图很小一部分、分布稀少，或几乎没有；包括大片与路面同高的平地、可通行区域宽广而周围高出结构很少，以及主要为低处且缺少高出结构
+    不确定: 缺失、错位或证据冲突，无法确定周围高出结构是否充分
+  interpretation:
+  - 先检查周围高出结构是否稀少或缺失；有充分高出结构时仍需检查纵向退化
+  - 有效区域内无明显高出结构本身即为结构不足的确定证据，直接判退化
+  - 明显高出结构仅占一小点或分布稀少，即使个别结构清晰，也判退化
+  - 有明显低处分布但缺少高出结构时判退化；高低并存时按高出结构是否充分判断
+  - 道路近似直线且两侧高度分布沿道路方向持续相似、重复或几乎不变时，判纵向退化；高出结构充分也不能豁免
+  - 两侧仅在一个横截面相似，或仅颜色相同但沿路高度轮廓明显变化，不足以证明纵向退化
+  - 周围明显高出结构清楚且面积、分布充分，并能排除纵向退化时，判不退化
+  - raised_structure=较弱 时不能判不退化：轮廓模糊不足以作为可靠高度参照；分布不充分时按低区分度判退化，否则保留未知
+  - 无法确认沿路高度分布时保留未知，不因目标清晰就直接判正常；结构不足的确定证据仍优先判退化
+  - 可通行区域占比很大的含义是周围高出结构仅占图像一小部分；不单独按路宽判定
+  - 占比及分布由 VLM 根据图像可见面积与空间分布独立判断，不设固定面积百分比、距离或目标数量门槛
+  - 直道或重复单独都不充分；不能只凭高值颜色面积大、颜色多或 RGB 建筑外观判断正常
+  - 无数据优先进入数据质量判断，不作为平坦或重复高度结构的证据
+  - 树冠或桥面遮挡可作为两侧可能采到不同表面层的风险证据，单凭遮挡不触发退化；关键结构无法判读时将相应字段记为不确定
+  - 不判断雷达实际可见性、定位方式切换，不推断图中未呈现的坡度或绝对海拔
+  verdict:
+    order: 先确认数据能否支持结论，再检查高出结构是否不足，随后检查近似直道两侧是否沿路重复，最后判断结构是否足以支持匹配。
+    退化: 数据足以确认路侧高出结构明显稀少或缺失。
+    纵向退化: 近似直道两侧的高度轮廓及分布沿路持续重复，难以区分位置。
+    不退化: 有清楚且分布充分的高出结构，并有证据排除纵向退化。
+    证据不足: 数据不可用或数据质量把握低，或关键对照缺失且其余证据无法支持上述任何结论。
+    reason: 写出支持结论的位置和高程证据。俯视遮挡单独只记录为风险。
+  evidence_refs:
+    structures: H 对应 height_comparisons.road_and_surroundings。overhead_occlusion 只能解释失配风险，不作为单独的结论引用。
+    longitudinal: 把两个不同的沿路位置及各自的布局写进 longitudinal_comparisons，依次为 A1、A2。证据不足时可留空；判纵向退化须同时引用 A1、A2。
+    result: 先填结构观察，再在 verdict.evidence_refs 引用已填写的证据。退化和不退化须引用相应的结构证据。证据不足时留空并写明缺项。
+    data: 数据不可用、是否可用仍不确定或数据置信度低时，verdict 填证据不足。
+  road_geometry:
+    近似直线: RGB 中可辨道路在当前区域内近似直线；以 RGB 可见路带为准，可参考上下文图的道路走向
+    非直线: 道路有明显弯曲、转折或路口分支，不能作为贯穿区域的单一直道
+    不适用: 已确认的广场或场院等非线状可通行区域，无法定义沿路方向
+    不确定: 遮挡或证据冲突，无法确定道路几何形态
+  longitudinal_structure:
+    重复: 近似直道两侧的高度颜色、轮廓及分布持续相似，沿道路方向重复或几乎不变，缺少可辨高度变化；RGB 辅助辨认对应地物
+    有变化: 沿道路方向两侧高度分布存在可辨变化、间断或不一致，不能认定为两侧持续相似的重复高度走廊
+    不适用: 已确认不存在可定义沿路方向的线状道路；不能用来代替看不清
+    不确定: 沿路关键位置缺失、遮挡或证据不足，无法确认是否重复
+consistency_checks:
+  object: 对低置信度处理后的有效值检查；未知或不确定不构成确定冲突。命中时仅将 invalidate 中的字段改为不确定（area_type 用未知），其它字段继续判定；consistency_check 及 consistency_failures
+    仅记录检查状态和冲突。
+  rules:
+  - when:
+      road_geometry:
+      - 不适用
+      longitudinal_structure:
+      - 重复
+      - 有变化
+    invalidate:
+    - road_geometry
+    - longitudinal_structure
+    reason: incompatible_longitudinal_applicability
+  - when:
+      road_geometry:
+      - 近似直线
+      - 非直线
+      longitudinal_structure:
+      - 不适用
+    invalidate:
+    - road_geometry
+    - longitudinal_structure
+    reason: incompatible_longitudinal_applicability
+  - when:
+      area_type:
+      - 道路
+      road_geometry:
+      - 不适用
+    invalidate:
+    - road_geometry
+    - longitudinal_structure
+    reason: road_geometry_not_applicable_to_road
+  - when:
+      raised_structure:
+      - 无明显高出结构
+      height_distinctiveness:
+      - 高
+    invalidate:
+    - raised_structure
+    - height_distinctiveness
+    reason: incompatible_raised_structure
+preprocess:
+- area_type_confidence=低 时，area_type 仅视为 未知，不再应用其它字段的替换规则
+- 除 area_type、data_status 及仅记录字段外，支持不确定选项的判定字段在 <字段名>_confidence=低 时视为 不确定；其余字段照常参与判定
+- data_status 与 data_confidence 不做替换，由 degradation_decision 的数据质量前置规则处理
+degradation_decision:
+- when:
+    data_status:
+    - 不可用
+    - 不确定
+  result: null
+  reason: insufficient_data
+  degradation_type: 未知
+- when:
+    data_confidence:
+    - 低
+  result: null
+  reason: uncertain_data_quality
+  degradation_type: 未知
+- when:
+    area_type:
+    - 不可通行
+  result: null
+  reason: not_drivable
+  degradation_type: 未知
+- when:
+    raised_structure:
+    - 无明显高出结构
+  result: true
+  reason: low_height_distinctiveness
+  degradation_type: 退化
+- when:
+    raised_structure:
+    - 较弱
+    - 清晰
+    height_distinctiveness:
+    - 低
+  result: true
+  reason: low_height_distinctiveness
+  degradation_type: 退化
+- when:
+    road_geometry:
+    - 近似直线
+    longitudinal_structure:
+    - 重复
+  result: true
+  reason: longitudinal_repetition
+  degradation_type: 纵向退化
+- when:
+    raised_structure:
+    - 清晰
+    height_distinctiveness:
+    - 高
+    road_geometry:
+    - 非直线
+    - 不适用
+  result: false
+  reason: distinctive_raised_structure
+  degradation_type: 不退化
+- when:
+    raised_structure:
+    - 清晰
+    height_distinctiveness:
+    - 高
+    longitudinal_structure:
+    - 有变化
+  result: false
+  reason: distinctive_raised_structure
+  degradation_type: 不退化
+- when:
+    consistency_check:
+    - 不通过
+  result: null
+  reason: inconsistent_fields
+  degradation_type: 未知
+- when: {}
+  result: null
+  reason: unclear_height_structure
+  degradation_type: 未知
+reason_records:
+  candidate_reasons: 低置信度替换后、矛盾字段屏蔽前，满足观察条件的退化原因；未通过数据质量、适用性或一致性检查也可保留，仅为候选，不表示已确认
+  matched_reasons: 最终 result=true 时，按屏蔽矛盾字段后的有效值收集全部命中的退化原因；result=false/null 时为空；各列表按规则顺序去重

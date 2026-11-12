@@ -1,0 +1,343 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "height 结构风险观察输出 v11",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "block_id",
+    "review_type",
+    "observations",
+    "schema_version",
+    "drivable_check",
+    "data_check",
+    "height_check"
+  ],
+  "properties": {
+    "block_id": {
+      "type": "string",
+      "description": "原样返回，每次请求绑定常量"
+    },
+    "review_type": {
+      "type": "string",
+      "const": "height"
+    },
+    "observations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "context",
+        "rgb",
+        "height"
+      ],
+      "properties": {
+        "context": {
+          "type": "string",
+          "minLength": 1,
+          "description": "第 1 张整体 RGB：周围地形、道路延伸、桥梁或疑似隧道等结构"
+        },
+        "rgb": {
+          "type": "string",
+          "minLength": 1,
+          "description": "第 2 张局部 RGB 中可见的真实地物、路面和遮挡"
+        },
+        "height": {
+          "type": "string",
+          "minLength": 1,
+          "description": "第 3 张高程图的颜色分布：哪些位置比路面更高或更低"
+        }
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "const": 11
+    },
+    "drivable_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence",
+        "area_type",
+        "area_type_confidence",
+        "uncertainty"
+      ],
+      "properties": {
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "description": "本项可见证据及其位置"
+        },
+        "area_type": {
+          "type": "string",
+          "enum": [
+            "道路",
+            "铺装广场",
+            "停车场或硬化场院",
+            "未铺装便道或压实土场",
+            "不可通行",
+            "未知"
+          ],
+          "description": "地面类型；无法确认用 未知"
+        },
+        "area_type_confidence": {
+          "type": "string",
+          "enum": [
+            "高",
+            "中",
+            "低"
+          ],
+          "description": "area_type 的独立置信度；低 时程序将该字段视为 未知"
+        },
+        "uncertainty": {
+          "type": "string",
+          "minLength": 1,
+          "description": "本项无法确认的因素；没有写“无”"
+        }
+      }
+    },
+    "data_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence",
+        "status",
+        "data_confidence",
+        "uncertainty"
+      ],
+      "properties": {
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "description": "本项可见证据及其位置"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "可用",
+            "局部受限",
+            "不可用",
+            "不确定"
+          ],
+          "description": "专题图是否足以判断结构，见 Rule data"
+        },
+        "data_confidence": {
+          "type": "string",
+          "enum": [
+            "高",
+            "中",
+            "低"
+          ],
+          "description": "data_status 的独立置信度；低 表示不足以确定"
+        },
+        "uncertainty": {
+          "type": "string",
+          "minLength": 1,
+          "description": "本项无法确认的因素；没有写“无”"
+        }
+      }
+    },
+    "height_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence",
+        "height_comparisons",
+        "relief",
+        "raised_structure",
+        "raised_structure_confidence",
+        "height_distinctiveness",
+        "height_distinctiveness_confidence",
+        "road_geometry",
+        "road_geometry_confidence",
+        "longitudinal_structure",
+        "longitudinal_structure_confidence",
+        "uncertainty",
+        "longitudinal_comparisons",
+        "verdict"
+      ],
+      "properties": {
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "description": "RGB 地物与对应高度颜色的位置、面积及分布证据"
+        },
+        "height_comparisons": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "road_and_surroundings",
+            "along_road",
+            "overhead_occlusion"
+          ],
+          "properties": {
+            "road_and_surroundings": {
+              "type": "string",
+              "minLength": 1,
+              "description": "路面在哪里、DSM 颜色如何？相对路面明显高出的结构在哪里、轮廓是否清楚、分布是否充分？"
+            },
+            "along_road": {
+              "type": "string",
+              "minLength": 1,
+              "description": "道路几何如何？沿道路哪两处的两侧高度轮廓重复或变化？无法比较时说明缺少的证据。"
+            },
+            "overhead_occlusion": {
+              "type": "string",
+              "minLength": 1,
+              "description": "哪里有俯视遮挡或多层表面的图像证据？记录位置和 DSM 表面特征。未见迹象或无法判断时直接说明。"
+            }
+          }
+        },
+        "relief": {
+          "type": "string",
+          "enum": [
+            "平坦",
+            "局部起伏",
+            "起伏多样",
+            "不确定"
+          ],
+          "description": "图示整体起伏"
+        },
+        "raised_structure": {
+          "type": "string",
+          "enum": [
+            "清晰",
+            "较弱",
+            "无明显高出结构",
+            "不确定"
+          ],
+          "description": "明显高出结构是否清晰；清晰不代表面积或分布充分"
+        },
+        "raised_structure_confidence": {
+          "type": "string",
+          "enum": [
+            "高",
+            "中",
+            "低"
+          ],
+          "description": "raised_structure 的独立置信度；低 时程序将该字段视为 不确定"
+        },
+        "height_distinctiveness": {
+          "type": "string",
+          "enum": [
+            "高",
+            "低",
+            "不确定"
+          ],
+          "description": "可通行区域周围明显高出结构的充分程度；只占图像一小点时为 低，即使轮廓清楚"
+        },
+        "height_distinctiveness_confidence": {
+          "type": "string",
+          "enum": [
+            "高",
+            "中",
+            "低"
+          ],
+          "description": "height_distinctiveness 的独立置信度；低 时程序将该字段视为 不确定"
+        },
+        "road_geometry": {
+          "type": "string",
+          "enum": [
+            "近似直线",
+            "非直线",
+            "不适用",
+            "不确定"
+          ],
+          "description": "RGB 道路几何；以 RGB 可见路带为准，可参考上下文图的道路走向，见 Rule"
+        },
+        "road_geometry_confidence": {
+          "type": "string",
+          "enum": [
+            "高",
+            "中",
+            "低"
+          ],
+          "description": "road_geometry 的独立置信度；低 时程序将该字段视为 不确定"
+        },
+        "longitudinal_structure": {
+          "type": "string",
+          "enum": [
+            "重复",
+            "有变化",
+            "不适用",
+            "不确定"
+          ],
+          "description": "直道两侧高度分布是否沿道路方向持续相似且重复"
+        },
+        "longitudinal_structure_confidence": {
+          "type": "string",
+          "enum": [
+            "高",
+            "中",
+            "低"
+          ],
+          "description": "longitudinal_structure 的独立置信度；低 时程序将该字段视为 不确定"
+        },
+        "uncertainty": {
+          "type": "string",
+          "minLength": 1,
+          "description": "本项无法确认的因素；没有写“无”"
+        },
+        "longitudinal_comparisons": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "position",
+              "observation"
+            ],
+            "properties": {
+              "position": {
+                "type": "string",
+                "minLength": 1
+              },
+              "observation": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "verdict": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "evidence_refs",
+            "reason"
+          ],
+          "properties": {
+            "result": {
+              "type": "string",
+              "enum": [
+                "退化",
+                "纵向退化",
+                "不退化",
+                "证据不足"
+              ]
+            },
+            "evidence_refs": {
+              "type": "array",
+              "uniqueItems": true,
+              "maxItems": 4,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "H",
+                  "A1",
+                  "A2",
+                  "N"
+                ]
+              }
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "指出支持最终判断的对照位置和高程证据"
+            }
+          }
+        }
+      }
+    }
+  }
+}

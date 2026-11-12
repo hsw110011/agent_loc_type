@@ -1,0 +1,45 @@
+# LangGraph、感知工具（MaGRoad/Depth Anything/SegEarth-OV3）和本地 VLM（EXL3 Qwen3.8-27B + DFlash2）共用一个环境 .venv。
+# torch 使用 CUDA 12.8 构建：pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.10.0
+torchvision==0.25.0
+transformers==4.57.6
+langgraph==1.2.11
+rasterio==1.4.4
+numpy>=1.24,<3
+Pillow>=10.0,<13
+jsonschema>=4.18,<5
+PyYAML>=6,<7
+Shapely>=2.1,<3
+tqdm>=4.66,<5
+
+# 流程直接使用的包（cv2 遍布 map_preprocess；einops/psutil 为 SAM 3 推理所需）
+opencv-python-headless==5.0.0.93
+einops==0.8.2
+psutil==7.2.2
+
+# Road topology graph (already installed; no environment changes during reorganization)
+networkx>=3,<4
+
+# Mask-based road topology (agent/map_preprocess/utils/road_topo.py)
+scipy>=1.11,<2
+scikit-image>=0.24,<1
+sknw>=0.15,<1
+
+# Local depth model retrieval and safetensors (already installed)
+huggingface-hub>=0.34,<1
+safetensors>=0.4,<1
+
+# SegEarth-OV3 / SAM 3 (percection_tool/segearth_ov3)
+timm==0.9.16
+iopath==0.1.10
+ftfy==6.3.1
+pycocotools==2.0.11
+
+# ExLlamaV3 运行依赖（引擎源码在 qwen3827b-exl3-dflash2/exllamav3，按 README 编译安装到 .venv）
+tokenizers>=0.21.1
+llguidance>=1.7.0
+marisa_trie
+rich
+pydantic>=2
+ninja
+typing_extensions
