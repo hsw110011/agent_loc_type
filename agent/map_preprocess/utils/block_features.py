@@ -96,7 +96,9 @@ def step_mask(dsm: np.ndarray, m_per_px: float, step_m: float, run_m: float) -> 
     filled_lo = np.where(finite, dsm, np.inf).astype(np.float32)
     local_max = cv2.dilate(filled_hi, kernel)
     local_min = cv2.erode(filled_lo, kernel)
-    return ~finite | (local_max-local_min >= step_m)
+    difference = np.zeros_like(dsm)
+    np.subtract(local_max, local_min, out=difference, where=finite)
+    return ~finite | (difference >= step_m)
 
 
 def continuous_region(dsm: np.ndarray, seed: np.ndarray, m_per_px: float, step_m: float, run_m: float) -> np.ndarray:
@@ -118,32 +120,62 @@ def continuous_region(dsm: np.ndarray, seed: np.ndarray, m_per_px: float, step_m
     return np.zeros_like(seed)
 
 
-def road_reference(finite: np.ndarray, labels: np.ndarray, center_rc: tuple[float, float],
-                   m_per_px: float) -> tuple[np.ndarray | None, str, float | None]:
-    """在中心 5 m 或 10 m 方窗内取 DSM 有效的语义 road 像元。"""
-    road = finite & (labels == ROAD)
-    h, w = road.shape
+def road_reference(dsm: np.ndarray, labels: np.ndarray, center_rc: tuple[float, float],
+                   m_per_px: float, settings, cleaned_road: np.ndarray | None) -> tuple[np.ndarray | None, dict]:
+    """按 5、10、20 m 方窗验证路面样本，每档优先语义道路。"""
     row, col = center_rc
     ir, ic = int(np.floor(row+.5)), int(np.floor(col+.5))
+    h, w = dsm.shape
     yy, xx = np.ogrid[:h, :w]
     dy, dx = (yy-row)*m_per_px, (xx-col)*m_per_px
-    if 0 <= ir < h and 0 <= ic < w and road[ir, ic]:
-        local = road & (dy >= -2.5) & (dy < 2.5) & (dx >= -2.5) & (dx < 2.5)
-        if local.any():
-            return local, 'center_road', 0.
-    expanded = road & (dy >= -5.) & (dy < 5.) & (dx >= -5.) & (dx < 5.)
-    if expanded.any():
-        distance = np.hypot(dy, dx)
-        return expanded, 'expanded_road', float(distance[expanded].min()/m_per_px)
-    return None, 'no_road', None
+    road = labels == ROAD
+    finite = np.isfinite(dsm)
+    windows = []
+    for size_m, source in ((5, 'center_road'), (10, 'expanded_road'), (20, 'expanded_road')):
+        half = size_m/2
+        window = (dy >= -half) & (dy < half) & (dx >= -half) & (dx < half)
+        windows.append((size_m, source, window & road))
+        if cleaned_road is not None:
+            windows.append((size_m, 'cleaned_road', window & cleaned_road))
+
+    attempts = []
+    for size_m, source, mask in windows:
+        seed = mask & finite
+        sample_count, valid_count = int(mask.sum()), int(seed.sum())
+        valid_pct = 100.*valid_count/sample_count if sample_count else None
+        iqr = None
+        reasons = []
+        if not sample_count:
+            reasons.append('no_road_samples')
+        else:
+            if not valid_count:
+                reasons.append('road_dsm_no_data')
+            if valid_count < settings.feature_road_ref_min_samples:
+                reasons.append('too_few_valid_samples')
+            if valid_pct < settings.feature_road_ref_min_valid_pct:
+                reasons.append('low_valid_sample_coverage')
+            if valid_count >= settings.feature_road_ref_min_samples:
+                q25, q75 = np.percentile(dsm[seed], [25, 75])
+                iqr = float(q75-q25)
+                if iqr > settings.feature_road_ref_max_iqr_m:
+                    reasons.append('unstable_road_elevation')
+        attempts.append({'source': source, 'window_m': size_m, 'sample_count': sample_count, 'valid_count': valid_count,
+                         'valid_pct': valid_pct, 'iqr_m': iqr, 'reasons': reasons})
+        if not reasons:
+            at_center = 0 <= ir < h and 0 <= ic < w and seed[ir, ic]
+            offset_m = 0. if at_center else float(np.hypot(dy, dx)[seed].min())
+            return seed, {'valid': True, 'source': source, 'offset_m': offset_m, 'window_m': size_m, 'attempts': attempts}
+    return None, {'valid': False, 'source': None, 'offset_m': None, 'window_m': None, 'attempts': attempts}
 
 
 def dsm_height_features(dsm: np.ndarray, labels: np.ndarray, settings, m_per_px: float = 1.,
-                        center_rc: tuple[float, float] | None = None) -> dict:
+                        center_rc: tuple[float, float] | None = None,
+                        cleaned_road: np.ndarray | None = None) -> dict:
     """DSM（米）→ 相对块中心路面的高度及其分段占比；labels 已缩放到 DSM 块网格，m_per_px 为该网格分辨率。
 
     0 点 = 语义路面的 DSM 中位数（见 road_reference）：块中心（道路拓扑线上的点，center_rc 为其在块网格中的行列）
-    位于有效路面时取中心 5 m 方窗，否则扩大到 10 m 方窗；无有效路面时不判高度（height_* 为 null）。
+    依次尝试中心 5、10、20 m 方窗，每档语义道路失败后尝试清洗道路。
+    无有效路面基准时跳过相对高度统计，保留取样诊断。
     相对高度 = DSM − 0 点，单位米、不缩放；[-feature_below_base_tolerance_m, 0) 的路面噪声视为 0 m。
 
     低于路面（< −tolerance）的像元按高度变化是否连续分两类（feature_step_height_m / feature_step_run_m）：
@@ -152,23 +184,25 @@ def dsm_height_features(dsm: np.ndarray, labels: np.ndarray, settings, m_per_px:
     below_base_pct = 两类合计（信息）；高度退化的“低于路面”只看 step_below_pct。
     可选 feature_dsm_detrend 先减去块内地形平面。下划线键只用于可视化。
     """
-    inside = labels != IGNORE
-    finite = np.isfinite(dsm) & inside
-    nodata_pct = float(np.count_nonzero(inside & ~np.isfinite(dsm))*100/max(1, inside.sum()))
-    result = {'height_band_pct': None, 'height_stats': None, '_relative': None}
-    if not finite.any():
+    from .dsm import valid_dsm_elevation
+
+    dsm = np.where(valid_dsm_elevation(dsm), dsm, np.nan)
+    h, w = dsm.shape
+    center = center_rc if center_rc is not None else ((h-1)/2, (w-1)/2)
+    seed, quality = road_reference(dsm, labels, center, m_per_px, settings, cleaned_road)
+    result = {'height_band_pct': None, 'height_stats': None, 'road_reference': quality, '_relative': None}
+    if seed is None:
         return result
+    reference = quality['source']
+    inside = np.ones(dsm.shape, dtype=bool) if reference == 'cleaned_road' else labels != IGNORE
+    finite = np.isfinite(dsm) & inside
+    nodata_pct = float(np.count_nonzero(inside & ~finite)*100/inside.sum())
     plane = ground_plane(dsm, finite, settings.feature_dsm_ground_cells) if settings.feature_dsm_detrend else None
     slope, surface = None, dsm
     if plane is not None:
         gy, gx = np.gradient(plane)
         slope = float(np.hypot(gx.mean(), gy.mean())/m_per_px*100)
         surface = dsm-plane
-    h, w = dsm.shape
-    row, col = center_rc if center_rc is not None else ((h-1)/2, (w-1)/2)
-    seed, reference, offset_px = road_reference(finite, labels, (row, col), m_per_px)
-    if seed is None:  # 块内没有可靠路面：不用屋顶或树冠代替 0 点，不判高度
-        return result
     base = float(np.median(surface[seed]))
     relative = np.where(finite, surface-base, np.nan).astype(np.float32)
     # 0 m 以下不算有效像元；0 点是路面中位数，与路面同高的像元约一半会因 DSM 噪声略低于 0，
@@ -176,6 +210,17 @@ def dsm_height_features(dsm: np.ndarray, labels: np.ndarray, settings, m_per_px:
     below = finite & (relative < -settings.feature_below_base_tolerance_m)
     region = continuous_region(surface, seed, m_per_px,
                                settings.feature_step_height_m, settings.feature_step_run_m)
+    # 只检查道路拓扑中心。路侧高物不应触发道路中央遮挡提示。
+    ir, ic = (int(np.floor(v+.5)) for v in center)
+    center_step_above = False
+    if (0 <= ir < h and 0 <= ic < w and np.isfinite(surface[ir, ic])
+            and surface[ir, ic]-base >= settings.feature_step_height_m and not region[ir, ic]):
+        # 核实路面样本到中心存在实际向上台阶，避免仅因 NoData 断开触发。
+        from scipy.ndimage import label
+
+        low_surface = np.isfinite(surface) & (surface < base+settings.feature_step_height_m)
+        components, _ = label(np.isfinite(surface), structure=np.ones((3, 3), dtype=bool))
+        center_step_above = bool(np.any(seed & low_surface & (components == components[ir, ic])))
     slope_below = below & region
     step_below = below & ~region
     relative[step_below] = np.nan
@@ -183,7 +228,7 @@ def dsm_height_features(dsm: np.ndarray, labels: np.ndarray, settings, m_per_px:
     counted = np.isfinite(relative)
     raw = dsm[finite]
     stats = {'dsm_min_m': float(raw.min()), 'dsm_max_m': float(raw.max()), 'base_ref': reference, 'base_dsm_m': base if plane is None else float(np.median(dsm[seed])),
-             'base_offset_m': offset_px*m_per_px,
+             'base_offset_m': quality['offset_m'], 'center_step_above': center_step_above,
              'below_base_pct': float(np.count_nonzero(below)*100/finite.sum()),
              'step_below_pct': float(np.count_nonzero(step_below)*100/finite.sum()),
              'slope_below_pct': float(np.count_nonzero(slope_below)*100/finite.sum()),

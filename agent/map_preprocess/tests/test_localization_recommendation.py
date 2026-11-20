@@ -33,13 +33,13 @@ BACKGROUND = (90, 120, 150)
 SYSTEM = load_recommendation_system()
 
 
-def answer(region_id: str, method: str = 'gps', status: str = 'provisional', review: bool = False, **overrides) -> dict:
+def answer(region_id: str, method: str = 'gps', status: str = 'provisional', **overrides) -> dict:
     assessment = {key: 'suitable' if method == key else 'unsuitable' for key in ('lidar_inertial_slam', 'wheel_imu_odometry')}
-    assessment.update(sky_view='open', obstruction_or_reflection='absent')
+    assessment.update(structure_density='dense' if method == 'lidar_inertial_slam' else 'sparse_or_repetitive',
+                      sky_view='open', obstruction_or_reflection='absent')
     return {'region_id': region_id, 'visual_evidence': [f'{region_id} 道路两侧可见农田'], 'recommended_method': method,
             'assessment': assessment,
-            'reason': f'{region_id} 周边开阔', 'limitations': [f'{region_id} 局部可能有遮挡'], 'recommendation_status': status,
-            'review_required': review, **overrides}
+            'reason': f'{region_id} 周边开阔', 'limitations': [f'{region_id} 局部可能有遮挡'], 'recommendation_status': status, **overrides}
 
 
 class FakeVLM:
@@ -70,17 +70,12 @@ class SystemTests(unittest.TestCase):
         self.assertNotIn('隧道', SYSTEM['prompt'])  # 适用条件只在 Rule 中定义
         self.assertIn('隧道', SYSTEM['rule'])
 
-    def test_lidar_and_wheel_are_same_level_and_gps_is_last_resort(self):
+    def test_localization_priority_and_gps_last_resort(self):
         selection = SYSTEM['rules']['selection']
         self.assertEqual({k: v['priority'] for k, v in SYSTEM['rules']['methods'].items()},
-                         {'lidar_inertial_slam': 'P0', 'wheel_imu_odometry': 'P0', 'gps': 'P1'})
-        self.assertIn('同级', selection['same_level']['principle'])
-        self.assertLessEqual({'lidar_inertial_slam', 'wheel_imu_odometry'}, set(selection['same_level']))
-        self.assertNotIn('gps', selection['same_level'])
+                         {'lidar_inertial_slam': 'P0', 'wheel_imu_odometry': 'P1', 'gps': 'P2'})
         self.assertEqual(selection['last_resort']['method'], 'gps')
-        for scene in ('草原', '广场'):
-            self.assertIn(scene, selection['last_resort']['when'])
-        self.assertTrue(any('树冠' in gate and 'gps' in gate for gate in selection['gates']))
+        self.assertIn('持续开阔', selection['last_resort']['when'])
 
     def test_vlm_is_not_told_degradation_or_asked_for_numbers(self):
         for text in (SYSTEM['prompt'], SYSTEM['skill'], SYSTEM['rule']):
@@ -129,7 +124,7 @@ class ValidationTests(unittest.TestCase):
     def test_valid_output_passes(self):
         check_recommendation(answer('Merged_1'), self.schema, SYSTEM['rules'])
 
-    def test_gps_requires_both_p0_unsuitable_and_open_sky_without_obstruction(self):
+    def test_gps_requires_both_odometry_methods_unsuitable_and_open_sky_without_obstruction(self):
         for key, value in (('lidar_inertial_slam', 'suitable'), ('wheel_imu_odometry', 'uncertain'),
                            ('sky_view', 'obstructed'), ('obstruction_or_reflection', 'present')):
             output = answer('Merged_1')
@@ -137,12 +132,33 @@ class ValidationTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaisesRegex(InvalidRecommendation, 'GPS 要求'):
                 check_recommendation(output, self.schema, SYSTEM['rules'])
 
-    def test_uncertain_p0_requires_validation_and_review(self):
+    def test_lio_precedes_suitable_wheel_even_with_gps_obstruction(self):
+        output = answer('Merged_1', 'wheel_imu_odometry')
+        output['assessment'].update(lidar_inertial_slam='suitable', sky_view='obstructed',
+                                    obstruction_or_reflection='present')
+        with self.assertRaisesRegex(InvalidRecommendation, 'lidar_inertial_slam'):
+            check_recommendation(output, self.schema, SYSTEM['rules'])
+        output['recommended_method'] = 'lidar_inertial_slam'
+        check_recommendation(output, self.schema, SYSTEM['rules'])
+
+    def test_dense_structure_requires_lidar_inertial_slam(self):
+        output = answer('Merged_1', 'wheel_imu_odometry')
+        output['assessment'].update(structure_density='dense', lidar_inertial_slam='uncertain', wheel_imu_odometry='suitable')
+        with self.assertRaisesRegex(InvalidRecommendation, 'structure_density=dense'):
+            check_recommendation(output, self.schema, SYSTEM['rules'])
+        output['assessment']['lidar_inertial_slam'] = 'unsuitable'
+        output['recommended_method'] = 'lidar_inertial_slam'
+        with self.assertRaisesRegex(InvalidRecommendation, 'unsuitable'):
+            check_recommendation(output, self.schema, SYSTEM['rules'])
+        output['assessment']['lidar_inertial_slam'] = 'suitable'
+        check_recommendation(output, self.schema, SYSTEM['rules'])
+
+    def test_uncertain_odometry_requires_validation(self):
         output = answer('Merged_1', 'wheel_imu_odometry')
         output['assessment']['wheel_imu_odometry'] = 'uncertain'
         with self.assertRaisesRegex(InvalidRecommendation, '暂定'):
             check_recommendation(output, self.schema, SYSTEM['rules'])
-        output.update(recommendation_status='requires_validation', review_required=True)
+        output.update(recommendation_status='requires_validation')
         check_recommendation(output, self.schema, SYSTEM['rules'])
 
     def test_illegal_enum_and_wrong_id_and_extra_field(self):
@@ -177,7 +193,7 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(wheel['recommendation_status'], 'requires_validation')
         self.assertTrue(any('累积' in item for item in wheel['limitations']))
         self.assertTrue(any('全局位置校正' in item for item in wheel['limitations']))
-        self.assertEqual(apply_program_rules(answer('M', 'gps', 'provisional', True), SYSTEM['rules'])['recommendation_status'], 'requires_validation')
+        self.assertEqual(apply_program_rules(answer('M', 'gps', 'requires_validation'), SYSTEM['rules'])['recommendation_status'], 'requires_validation')
         self.assertEqual(apply_program_rules(answer('M', 'gps', 'provisional'), SYSTEM['rules'])['recommendation_status'], 'provisional')
 
     def test_model_limitations_are_kept_first(self):
@@ -260,14 +276,14 @@ class NodeTests(unittest.TestCase):
         self.assertIn('累积', text)
         self.assertIn('短时', text)
 
-    def test_case4_mixed_environment_needs_review(self):
+    def test_case4_mixed_environment_needs_validation(self):
         self.write_regions([{'patch_id': 'A', 'bbox': [100, 100, 200, 200], 'degradation_type': 'degradation'}])
-        self.run_node(FakeVLM({'Merged_1': answer('Merged_1', 'lidar_inertial_slam', 'provisional', True,
+        self.run_node(FakeVLM({'Merged_1': answer('Merged_1', 'lidar_inertial_slam', 'requires_validation',
                                                  reason='北半部开阔、南半部密集建筑，单一方案难以覆盖全区域')}))
         region = self.output()['regions'][0]
-        self.assertTrue(region['review_required'])
+        self.assertNotIn('review_required', region)
         self.assertEqual(region['recommendation_status'], 'requires_validation')
-        self.assertIn('混合', SYSTEM['rule'])
+        self.assertIn('混合', SYSTEM['prompt'])
 
     def test_case5_each_region_is_independent_and_matched(self):
         regions = self.two_regions()
@@ -510,6 +526,11 @@ class NodeTests(unittest.TestCase):
                             ('vlm_localization_dry_run', 'yes'), ('vlm_localization_thinking_budget', -1)):
             with self.assertRaisesRegex(ValueError, name):
                 GlobalPreprocessConfig(segmenter='dummy', **{name: value})
+
+    def test_cli_dry_run_exits_zero(self):
+        from agent.map_preprocess.run_localization_recommendation import main as cli_main
+        self.two_regions()
+        self.assertEqual(cli_main(['--manifest', str(self.manifest_path), '--dry-run']), 0)
 
 
 if __name__ == '__main__':

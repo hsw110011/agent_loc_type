@@ -15,6 +15,7 @@ from .block_features import BUILDING, IGNORE, OTHER, PLANT, ROAD, band_index
 # road 红（白色叠在灰白路面上看不出，改红；分割工具自身输出仍为白）、building 蓝、plant 绿，other 品红，无效像元深灰。
 CLASS_RGB = {ROAD: (255, 0, 0), BUILDING: (0, 0, 255), PLANT: (0, 255, 0), OTHER: (255, 0, 255)}
 INVALID_RGB = (40, 40, 40)
+DSM_INVALID_RGB = (0, 0, 0)
 # 块内相对高度 0（本块最低）→ 1（>= feature_height_vis_max_m）的顺序色带（近似 viridis）。
 HEIGHT_ANCHORS = np.array([[0., 68, 1, 84], [.25, 59, 82, 139], [.5, 33, 145, 140],
                            [.75, 94, 201, 98], [1., 253, 231, 37]])
@@ -34,7 +35,7 @@ def height_colormap(values: np.ndarray) -> np.ndarray:
     clipped = np.clip(values[finite], HEIGHT_ANCHORS[0, 0], HEIGHT_ANCHORS[-1, 0])
     for channel in range(3):
         result[..., channel][finite] = np.rint(np.interp(clipped, HEIGHT_ANCHORS[:, 0], HEIGHT_ANCHORS[:, channel+1]))
-    result[~finite] = INVALID_RGB
+    result[~finite] = DSM_INVALID_RGB
     return result
 
 
@@ -72,14 +73,14 @@ def save_block_visuals(directory: Path, rgb: np.ndarray, labels: np.ndarray, rel
     images = {'rgb': _resize(rgb, side), 'semantic_color': _resize(color, side, nearest=True),
               'semantic_overlay': _resize(overlay, side)}
     if raw_dsm is not None:
-        # 原始 DSM：按本块有效值的最低→最高拉伸着色（绝对高程，未减路面），无效为深灰。
+        # 原始 DSM：按本块有效值的最低→最高拉伸着色（绝对高程，未减路面），无效为黑色。
         values = raw_dsm[np.isfinite(raw_dsm)]
         low, high = (float(values.min()), float(values.max())) if values.size else (0., 1.)
         images['dsm_raw'] = _resize(height_colormap((raw_dsm-low)/max(high-low, 1e-6)), side, nearest=True, height=tall)
     if relative_m is not None:
         finite = np.isfinite(relative_m)
         banded = np.empty((*relative_m.shape, 3), np.uint8)
-        banded[:] = INVALID_RGB
+        banded[:] = DSM_INVALID_RGB
         banded[finite] = np.array(band_colors(len(bands_m)+1), np.uint8)[band_index(relative_m[finite], bands_m)]
         # DSM 网格较粗：放大到与 RGB 缩略图同尺寸，最近邻保持像元边界清晰。
         images['height'] = _resize(height_colormap(relative_m/vis_max_m), side, nearest=True, height=tall)

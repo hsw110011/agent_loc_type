@@ -25,13 +25,13 @@ cache_dir: output/map_preprocess/cache
 block_size_m: 75
 # 跨边去重；关闭时保留各边独立布出的全部框。
 dedup_enabled: true
-# walk：剪除高重叠且无独占道路覆盖的初始框；greedy：独立候选全局贪心覆盖。
+# walk：剪除面积重叠至少 75% 且无独占道路覆盖的初始框；greedy：独立候选全局贪心覆盖。
 dedup_method: walk
 dedup_candidate_spacing_m: 10
 road_sample_spacing_m: 1
 min_road_coverage: 0.995  # greedy 模式的采样覆盖目标
-# 沿道路弧长预留 5% 重叠：75 m 的步长为 71.25 m，横向直路上框宽重叠 3.75 m。
-block_overlap_ratio: 0.05
+# 沿道路弧长预留 35% 重叠：75 m 的步长为 48.75 m，横向直路上框宽重叠 26.25 m。
+block_overlap_ratio: 0.35
 blocks_per_group: 3
 group_overlap_blocks: 1
 long_edge_strategy: split_continuous
@@ -42,10 +42,17 @@ branch_review_enabled: false
 road_topo_enabled: true
 # 优先读 GeoTIFF；普通图片应提供真实 zoom/center_lat，缺失时警告后使用此假设。
 fallback_resolution_m_per_px: 1.0
+analysis: auto  # auto（有 DSM 用高程）、semantic、height 或 both；--analysis 可覆盖
 block_features_enabled: true      # Node 5
+feature_semantic_max_road_pct: 15  # 语义初筛要求道路占比严格小于此值（%），且植被 > 65% 或植被+建筑 > 85%
+feature_semantic_min_clutter_pct: 85  # 建筑+植被混合区兜底阈值（%）
+feature_road_ref_min_samples: 3    # 路面基准最少有效 DSM 像元数
+feature_road_ref_min_valid_pct: 50  # 取样窗内道路像元的有效 DSM 覆盖率下限（%）
+feature_road_ref_max_iqr_m: 2       # 有效道路高程 P75 − P25 上限（米）
 scene_vlm_reasoning_effort: medium  # Node 1b，仅未知场景调用 VLM
 scene_vlm_thinking_budget: 2048     # 思考 token 上限；0 关闭思考
 vlm_review_enabled: true          # Node 6，依赖 Node 5
+vlm_review_max_retries: 1         # Node 6 失败（如截断或瞬时服务错误）重试次数
 vlm_review_reasoning_effort: medium  # Qwen 模板思考档位：low / medium / xhigh
 vlm_review_thinking_budget: 2048     # 思考 token 上限；0 关闭思考
 vlm_review_height_context_m: 100  # Node 6 高度复核：整体 RGB 上下文及参考高程范围（米）
@@ -76,7 +83,7 @@ scene_type_known:
 # VLM 失败、判“不确定”或置信度低时使用
 scene_type_fallback: wild
 
-# ===== 道路拓扑参数（Node 3）：MaGRoad 概率 + 语义分割生成路网 =====
+# ===== 道路拓扑参数（Node 3）：仅用 MaGRoad 概率生成路网 =====
 road_topo:
 
   classes:             # SegEarth 语义 mask：0=道路、1=建筑、2=植被（含裸地、草地、耕地）、255=无效
@@ -88,8 +95,8 @@ road_topo:
 
   steps:               # 每一步的开关
     preprocess: true
-    fuse: true
-    occlusion: true
+    fuse: true  # 仅独立工具提供语义时生效
+    occlusion: true  # 仅独立工具提供语义时生效
     fill_holes: true
     smooth_mask: true
     area_regions: true
@@ -198,7 +205,7 @@ road_skeleton_fill_min_length_m: 40
 road_paved_ring_min_road: 0.6
 road_paved_ring_max_perimeter_m: 300
 # 路线：拓扑定稿后优先沿模型概率脊线走，概率弱或断开处用 SegEarth-OV3 道路类补，连接关系不变；路线离原线最多 25 m，路口吸附半径 8 m（宽路上随半宽放大，最多 15 m）。
-road_semantic_route_enabled: true
+road_semantic_route_enabled: false
 road_semantic_route_corridor_m: 25
 road_semantic_route_node_snap_m: 8
 # 曲率平滑 sigma（米）：同一条路穿过路口时连成整条路线平滑，切向在节点处连续。

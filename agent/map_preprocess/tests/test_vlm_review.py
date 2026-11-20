@@ -57,7 +57,8 @@ def current_output(output):
     output = deepcopy(output)
     result = derive(output)['degradation_type']
     height = output['review_type'] == 'height'
-    output['schema_version'] = 11 if height else 10
+    output['schema_version'] = 12 if height else 11
+    output.pop('drivable_check', None)
     check = output['height_check' if height else 'degradation_check']
     check['longitudinal_comparisons'] = [
         {'position': '前段', 'observation': '左侧高出结构'},
@@ -96,7 +97,7 @@ class SchemaTests(unittest.TestCase):
                 self.assertNotIn(key, schema['properties'])
             self.assertNotIn('allOf', schema)
             # 证据字段排在结论之前：生成顺序即判断顺序
-            for name in ('drivable_check', 'degradation_check' if kind == 'semantic' else 'height_check'):
+            for name in ('degradation_check' if kind == 'semantic' else 'height_check',):
                 props = list(schema['properties'][name]['properties'])
                 self.assertEqual(props[0], 'evidence')
             self.assertEqual(list(schema['properties'])[2], 'observations')
@@ -150,19 +151,11 @@ class SchemaTests(unittest.TestCase):
             validator = Draft202012Validator(schema)
             output = output_for(kind, 'B')
             output = current_output(output)
-            output['drivable_check']['area_type'] = '未铺装便道或压实土场'
             check_output({'block_id': 'B', 'review_type': kind}, output, schema)
-            self.assertTrue(derive(output)['is_drivable'])
-            for field, legacy in (('area_type', 'unpaved_track'), ('area_type_confidence', 'high')):
-                bad = deepcopy(output)
-                bad['drivable_check'][field] = legacy
-                with self.assertRaises(ValidationError):
-                    validator.validate(bad)
-            for removed in ('surface', 'visibility'):     # Rule 未定义的字段，模型不再输出
-                bad = deepcopy(output)
-                bad['drivable_check'][removed] = 'x'
-                with self.assertRaises(ValidationError):
-                    validator.validate(bad)
+            bad = deepcopy(output)
+            bad['drivable_check'] = {'area_type': '道路'}
+            with self.assertRaises(ValidationError):
+                validator.validate(bad)
             bad = deepcopy(output)
             bad['schema_version'] = 2
             with self.assertRaises(ValidationError):
@@ -212,6 +205,35 @@ class SchemaTests(unittest.TestCase):
             output['data_check']['status'] = '不可用'
             self.assertEqual(derive(output)['reason_code'], 'insufficient_data')
 
+    def test_verdict_contradicting_reason_is_discarded(self):
+        for kind, name in (('semantic', 'degradation_check'), ('height', 'height_check')):
+            output = current_output(output_for(kind, 'B'))
+            output[name]['verdict']['result'] = '退化'
+            output[name]['verdict']['reason'] = '综合判断该区域结构完整，匹配不退化。'
+            derived = derive(output)
+            self.assertIsNone(derived['degraded'])
+            self.assertEqual(derived['reason_code'], 'verdict_reason_contradiction')
+
+            output[name]['verdict']['result'] = '退化'
+            output[name]['verdict']['reason'] = '满足单类占优退化条件，但纵向退化不成立。'
+            self.assertIs(derive(output)['degraded'], True)
+
+            output[name]['verdict']['result'] = '不退化'
+            output[name]['verdict']['reason'] = '植被占优且路带被截断，判为退化。'
+            derived = derive(output)
+            self.assertIsNone(derived['degraded'])
+            self.assertEqual(derived['reason_code'], 'verdict_reason_contradiction')
+
+    def test_verdict_reason_precedes_result_and_allows_occluded_ref(self):
+        for kind, name in (('semantic', 'degradation_check'), ('height', 'height_check')):
+            verdict_props = list(load_review_system(kind)['schema']['properties'][name]['properties']['verdict']['properties'])
+            self.assertLess(verdict_props.index('reason'), verdict_props.index('result'))
+        output = current_output(output_for('semantic', 'B'))
+        check = output['degradation_check']
+        check['road_comparisons'].append({**check['road_comparisons'][0], 'position': '中部树冠段', 'rgb_basis': '无法确认', 'semantic_road': '缺失'})
+        check['verdict']['evidence_refs'] = ['R1', 'R2']
+        self.assertIs(derive(output)['degraded'], True)
+
     def test_longitudinal_evidence_requires_distinct_positions(self):
         old = output_for('height', 'B', degraded=False)
         old['height_check']['longitudinal_structure'] = '重复'
@@ -225,7 +247,6 @@ class SchemaTests(unittest.TestCase):
         for kind in ('semantic', 'height'):
             self.assertTrue(derive(output_for(kind, 'B'))['degraded'])
             self.assertTrue(derive(output_for(kind, 'B'))['keep'])
-            self.assertFalse(derive(output_for(kind, 'B', is_road=False))['keep'])
             self.assertFalse(derive(output_for(kind, 'B', degraded=False))['degraded'])
 
     def test_stats_are_neutral(self):
@@ -238,7 +259,6 @@ class SchemaTests(unittest.TestCase):
         output = output_for('semantic', 'B', degraded=False)
         record = {'block_id': 'B', 'review_type': 'semantic', 'status': 'ok', 'output': output, 'derived': derive(output)}
         decision = decide({'block_id': 'B', 'size_m': 64, 'valid_global_bbox': [0, 0, 10, 10]}, [record])
-        self.assertTrue(decision['is_drivable'])
         self.assertFalse(decision['degraded_scene'])
         self.assertEqual(decision['degradation_confirmed'], {'semantic': False})
         self.assertEqual((decision['recommended_size_m'], decision['expand'], decision['review_global_bbox']),
@@ -297,7 +317,7 @@ class SchemaTests(unittest.TestCase):
             for geometry, pattern, expected in (
                     (straight, '有变化', '不退化'),
                     ('非直线', '重复', '不退化'),
-                    ('不适用', '不适用', '未知'),   # 道路不能用 不适用 绕过纵向检查
+                    ('不适用', '不适用', '不退化'),
                     (straight, '不确定', '未知'),
                     ('不确定', '重复', '未知')):
                 detail.update(road_geometry=geometry, longitudinal_structure=pattern)
@@ -355,19 +375,11 @@ class SchemaTests(unittest.TestCase):
                 load_review_system('height', root=tmp)
 
     def test_confidence_is_independent(self):
-        output = output_for('height', 'B', is_road=False)
-        output['height_check']['raised_structure_confidence'] = '低'
-        result = derive(output)
-        self.assertFalse(result['is_drivable'])  # RGB 足够明确，不被高度低置信度阻断
-        self.assertIsNone(result['degraded'])
-        output['drivable_check']['area_type_confidence'] = '低'
-        self.assertIsNone(derive(output)['is_drivable'])
         output = output_for('semantic', 'B')
         output['data_check']['data_confidence'] = '低'
         result = derive(output)
         self.assertIsNone(result['degraded'])
         self.assertEqual(result['reason_code'], 'uncertain_data_quality')
-        self.assertTrue(result['is_drivable'])
 
     def test_low_confidence_only_replaces_its_own_field(self):
         output = output_for('height', 'B')
@@ -384,7 +396,6 @@ class SchemaTests(unittest.TestCase):
         output = output_for('semantic', 'B', is_road=False)
         output['drivable_check']['area_type_confidence'] = '低'
         result = derive(output)
-        self.assertIsNone(result['is_drivable'])
         self.assertEqual(result['reason_code'], 'road_intrusion')
 
     def test_confidence_precedes_consistency_and_preserves_independent_evidence(self):
@@ -395,7 +406,6 @@ class SchemaTests(unittest.TestCase):
             result = derive(output)
             self.assertEqual(result['consistency_check'], '不通过')
             self.assertTrue(result['degraded'])  # 无关几何矛盾不阻断侵入/高度不足
-            self.assertTrue(result['is_drivable'])
             self.assertTrue(result['consistency_failures'])
             output[key]['road_geometry_confidence'] = '低'
             result = derive(output)
@@ -410,12 +420,8 @@ class SchemaTests(unittest.TestCase):
             output = output_for(kind, 'B', degraded=False)
             output[key].update(road_geometry='不适用', longitudinal_structure='不适用')
             result = derive(output)
-            self.assertEqual((result['consistency_check'], result['reason_code'], result['degraded']),
-                             ('不通过', 'inconsistent_fields', None))
-            self.assertEqual(result['matched_reasons'], [])
-            output['drivable_check']['area_type'] = '停车场或硬化场院'
-            self.assertEqual(derive(output)['consistency_check'], '通过')
-            self.assertFalse(derive(output)['degraded'])
+            self.assertEqual(result['consistency_check'], '通过')
+            self.assertFalse(result['degraded'])
         output = output_for('height', 'B')
         output['height_check']['height_distinctiveness'] = '高'
         result = derive(output)
@@ -457,74 +463,22 @@ class SchemaTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     load_review_system('semantic', root=tmp)
 
-    def test_scene_area_type_uses_effective_drivable_results(self):
-        block = {'block_id': 'B', 'edge_id': 'E', 'global_xy': [32, 32], 'size_m': 64,
-                 'valid_global_bbox': [0, 0, 64, 64], 'features': {'degradation': {}}}
-        semantic = output_for('semantic', 'B', is_road=False)
-        semantic['drivable_check']['area_type_confidence'] = '低'
-        height = output_for('height', 'B', degraded=False)
-        def scene():
-            records = [{'review_type': o['review_type'], 'status': 'ok', 'output': o, 'derived': derive(o)}
-                       for o in (semantic, height)]
-            decision = decide(block, records)
-            self.assertTrue(decision['is_drivable'])
-            self.assertTrue(decision['degraded_scene'])
-            return scene_record({**block, 'vlm_review': decision})
-        self.assertEqual(scene()['area_type'], '道路')  # 类型证据来自未退化的 height 输出
-        height['drivable_check']['area_type'] = '铺装广场'
-        self.assertEqual(scene()['area_type'], '铺装广场')
-        semantic['drivable_check'].update(area_type='道路', area_type_confidence='高')
-        self.assertEqual(scene()['area_type'], '未知')  # 两个可靠类型不一致，不任意选第一个
-
-    def test_height_not_drivable_has_no_degradation_and_is_resolved(self):
-        output = output_for('height', 'B', is_road=False)
-        result = derive(output)
-        self.assertEqual((result['is_drivable'], result['degraded'], result['reason_code'], result['degradation_type']),
-                         (False, None, 'not_drivable', '未知'))
-        record = {'review_type': 'height', 'status': 'ok', 'output': output, 'derived': result}
-        decision = decide({'size_m': 64, 'valid_global_bbox': [0, 0, 64, 64]}, [record])
-        self.assertEqual((decision['status'], decision['unresolved_review_types'], decision['degraded_scene']),
-                         ('ok', [], False))
-
-    def _semantic_decision(self, area_type, confidence='高', degraded=True):
-        output = output_for('semantic', 'B', degraded=degraded)
-        output['drivable_check'].update(area_type=area_type, area_type_confidence=confidence)
-        result = derive(output)
-        record = {'review_type': 'semantic', 'status': 'ok', 'output': output, 'derived': result}
-        return result, decide({'size_m': 64, 'valid_global_bbox': [0, 0, 64, 64]}, [record])
-
-    def test_semantic_degradation_ignores_drivability(self):
-        for area_type in ('未知', '不可通行'):
-            result, _ = self._semantic_decision(area_type)
-            self.assertIs(result['degraded'], True, area_type)
-            self.assertNotEqual(result['reason_code'], 'not_drivable')
-
-    def test_semantic_unknown_ground_still_gives_a_scene_conclusion(self):
-        result, decision = self._semantic_decision('道路', confidence='低')
-        self.assertIsNone(result['is_drivable'])
-        self.assertEqual((decision['degraded_scene'], decision['scene_types'], decision['status']), (True, ['semantic'], 'ok'))
-        _, decision = self._semantic_decision('未知', degraded=False)
-        self.assertEqual((decision['degraded_scene'], decision['scene_types'], decision['status']), (False, [], 'ok'))
-
-    def test_semantic_not_drivable_only_removes_the_block(self):
-        result, decision = self._semantic_decision('不可通行')
-        self.assertIs(result['is_drivable'], False)
-        self.assertEqual((decision['is_drivable'], decision['degraded_scene'], decision['scene_types']), (False, False, []))
-
-    def test_height_still_requires_confirmed_ground(self):
-        output = output_for('height', 'B')
-        output['drivable_check'].update(area_type='未知')
-        result = derive(output)
-        record = {'review_type': 'height', 'status': 'ok', 'output': output, 'derived': result}
-        decision = decide({'size_m': 64, 'valid_global_bbox': [0, 0, 64, 64]}, [record])
-        self.assertIs(decision['degraded_scene'], None)
+    def test_old_drivability_fields_do_not_gate_degradation(self):
+        for kind in ('semantic', 'height'):
+            old_output = output_for(kind, 'B', is_road=False)
+            result = derive(old_output)
+            self.assertTrue(result['keep'])
+            record = {'review_type': kind, 'status': 'ok', 'output': old_output, 'derived': result}
+            decision = decide({'size_m': 75, 'valid_global_bbox': [0, 0, 75, 75]}, [record])
+            self.assertEqual(decision['scene_types'], [kind])
+            self.assertNotIn('is_drivable', decision)
 
     def test_semantic_prompts_demand_judgement_under_tree_shade(self):
         system = load_review_system('semantic')
         for text in (system['prompt'], system['skill'], system['rule']):
             self.assertIn('树荫', text)
         self.assertNotIn('not_drivable', system['rule'])
-        self.assertTrue(system['rules']['decision_ignores_area'])
+        self.assertNotIn('drivable_check', system['schema']['properties'])
 
     def test_matched_reasons_exclude_unconfirmed_candidates(self):
         output = output_for('semantic', 'B')
@@ -545,7 +499,7 @@ class SchemaTests(unittest.TestCase):
         result = derive(output)  # 退化原因不看地面类型，不可通行只决定块不保留
         self.assertEqual(result['matched_reasons'],
                          ['road_intrusion', 'dominant_class_obscures_road', 'longitudinal_repetition'])
-        self.assertFalse(result['keep'])
+        self.assertTrue(result['keep'])
         self.assertEqual(derive(output_for('height', 'B', degraded=False))['matched_reasons'], [])
 
     def test_height_weak_structure_cannot_be_normal(self):
@@ -577,7 +531,6 @@ class SchemaTests(unittest.TestCase):
         unknown = output_for('height', 'B')
         unknown['data_check']['status'] = '不可用'
         result = decide(block, [record(unknown)])
-        self.assertTrue(result['is_drivable'])
         self.assertIsNone(result['degraded_scene'])
         self.assertEqual(result['status'], 'uncertain')
         # 已知不退化 + 另一种未知/失败，不能作为整体不退化。
@@ -589,11 +542,6 @@ class SchemaTests(unittest.TestCase):
         result = decide(block, [record(output_for('semantic', 'B')), record(unknown)])
         self.assertEqual(result['scene_types'], ['semantic'])
         self.assertEqual(result['unresolved_review_types'], ['height'])
-        # 两套复核对 RGB 地面判断相反时，不删除。
-        result = decide(block, [normal, record(output_for('height', 'B', is_road=False))])
-        self.assertTrue(result['drivable_conflict'])
-        self.assertIsNone(result['is_drivable'])
-        self.assertIsNone(result['degraded_scene'])
 
     def test_output_cannot_duplicate_conclusions(self):
         from agent.vlm.block_review import bind_block
@@ -609,7 +557,7 @@ class SchemaTests(unittest.TestCase):
     def test_prompt_boundaries_and_rule_mapping(self):
         for kind in ('semantic', 'height'):
             system = load_review_system(kind)
-            for name in ('drivable_check', 'data_check', 'degradation_check' if kind == 'semantic' else 'height_check'):
+            for name in ('data_check', 'degradation_check' if kind == 'semantic' else 'height_check'):
                 self.assertNotIn('confidence', system['schema']['properties'][name]['required'])
                 self.assertIn('uncertainty', system['schema']['properties'][name]['required'])
             self.assertEqual(system['rules']['degradation_decision'][-1]['when'], {})
@@ -799,7 +747,6 @@ class SchemaTests(unittest.TestCase):
                 derived = derive(current, evidence_problem='topic_no_data')
                 self.assertIsNone(derived['degraded'])
                 self.assertEqual(derived['reason_code'], 'topic_no_data')
-            self.assertTrue(derive(output)['is_drivable'])
 
 
 class FakeVLM:
@@ -905,31 +852,23 @@ class VLMReviewPipelineTests(node5.BlockFeatureTests):
             self.assertEqual(call['max_tokens'], self.review_config.vlm_review_max_tokens)
         self.assertEqual(summary['jobs_by_type'], {'semantic': 2, 'height': 3})
         # 退化场景清单：只有 VLM 确认退化成立的道路块
-        self.assertEqual(sorted(summary['degraded_scene_ids']), sorted([expanded, both]))
+        self.assertEqual(sorted(summary['degraded_scene_ids']), sorted([removed, expanded, both]))
         self.assertEqual(summary['rejected_block_ids'], [rejected])
         scenes = json.loads(resolve_path(summary['degraded_scenes']).read_text())
-        self.assertEqual(scenes['count'], 2)
+        self.assertEqual(scenes['count'], 3)
         scene = {s['block_id']: s for s in scenes['scenes']}
         self.assertEqual(scene[both]['scene_types'], ['semantic', 'height'])
-        self.assertEqual(scene[both]['area_type'], '道路')
-        self.assertEqual(scene[both]['vlm']['semantic']['drivable_confidence'], '低')
         self.assertEqual(scene[expanded]['scene_types'], ['height'])
         self.assertEqual(scene[expanded]['vlm']['height']['degradation_type'], '纵向退化')
         self.assertIn('height_comparisons', scene[expanded]['vlm']['height'])
         self.assertEqual(scene[expanded]['vlm']['height']['matched_reasons'], ['vlm_verdict'])
         self.assertEqual(scene[expanded]['vlm']['height']['candidate_reasons'], [])
         self.assertEqual(scene[expanded]['vlm']['height']['field_confidence']['road_geometry_confidence'], '高')
-        self.assertEqual(summary['schema_version'], 11)
+        self.assertEqual(summary['schema_version'], 12)
         result = load_manifest(path)
         kept = {b['block_id']: b for b in result['blocks']}
-        # 不是道路的块直接删除，并从引用中去掉
-        self.assertNotIn(removed, kept)
-        self.assertEqual(summary['removed_block_ids'], [removed])
-        for block in result['blocks']:
-            self.assertNotIn(removed, block.get('predecessor_ids', []) + block.get('successor_ids', []))
-        for edge in result['edges']:
-            self.assertNotIn(removed, edge.get('block_ids', []) + edge.get('covering_block_ids', []))
-        self.assertEqual(result['extensions']['vlm_review']['removed_blocks'][0]['block_id'], removed)
+        self.assertIn(removed, kept)
+        self.assertEqual(summary['removed_block_ids'], [])
         # 退化不成立：块留在路网中，但不是退化场景
         self.assertFalse(kept[rejected]['vlm_review']['degraded_scene'])
         self.assertFalse(kept[rejected]['vlm_review']['expand'])
@@ -1020,8 +959,6 @@ class VLMReviewPipelineTests(node5.BlockFeatureTests):
         blocks = {b['block_id']: b for b in load_manifest(state['manifest_path'])['blocks']}
         for key in (missing_height, uncertain_road):
             self.assertIsNone(blocks[key]['vlm_review']['degraded_scene'])
-        self.assertTrue(blocks[missing_height]['vlm_review']['is_drivable'])
-        self.assertIsNone(blocks[uncertain_road]['vlm_review']['is_drivable'])
 
     def test_invalid_output_keeps_block_and_dry_run(self):
         state, manifest = self.run_map()
@@ -1082,7 +1019,7 @@ class VLMReviewPipelineTests(node5.BlockFeatureTests):
         self.assertFalse(state['final_summary']['complete'])
         issue = state['final_summary']['issues'][0]
         self.assertEqual(issue['kind'], 'no_data')
-        self.assertTrue(all(reasons == ['semantic_no_data', 'dsm_no_data'] for reasons in issue['reasons_by_block'].values()))
+        self.assertTrue(all(reasons == ['dsm_no_data'] for reasons in issue['reasons_by_block'].values()))
         self.assertEqual(state['final_summary']['early_exit']['stage'], 'node5')
         nodes = list(load_manifest(state['manifest_path'])['files']['node_states'])
         self.assertEqual(nodes[-2:], ['05_compute_block_features', '06_refresh_global_manifest'])

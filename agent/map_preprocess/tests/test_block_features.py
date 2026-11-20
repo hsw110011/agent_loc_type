@@ -95,12 +95,35 @@ class BlockFeatureTests(unittest.TestCase):
                                  semantic_segmenter=FakeSemantic(self.events))
         return state, load_manifest(state['manifest_path'])
 
+    def test_explicit_analysis_modes_route_candidates(self):
+        from agent.map_preprocess.nodes.vlm_review import run_vlm_review
+        config = replace(self.config, feature_vis_enabled=False, feature_semantic_max_road_pct=99.,
+                         feature_semantic_min_plant_pct=1., feature_height_flat_min_pct=1.)
+        for mode, expected in [('semantic', ['semantic']), ('height', ['height']), ('both', ['semantic', 'height'])]:
+            with self.subTest(mode=mode):
+                state, manifest = self.run_map(replace(config, analysis=mode))
+                self.assertEqual(manifest['config']['analysis'], mode)
+                self.assertEqual(state['block_features']['analysis_branches'], expected)
+                self.assertEqual('dsm' in manifest['image'], mode != 'semantic')
+                summary = run_vlm_review(state["manifest_path"], config, dry_run=True,
+                                         semantic_segmenter=FakeSemantic(self.events))
+                self.assertEqual({kind for kind, count in summary['jobs_by_type'].items() if count}, set(expected))
+                if mode == 'both':
+                    from agent.map_preprocess.nodes.vlm_review import review_types
+                    self.assertTrue(any(review_types(block) == expected for block in manifest['blocks']))
+
+    def test_height_modes_require_dsm_before_creating_task(self):
+        for mode in ('height', 'both'):
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, f'--analysis {mode} 需要 DSM'):
+                self.run_map(replace(self.config, analysis=mode), dsm=False)
+        self.assertFalse((self.root/'out').exists())
+
     def test_pipeline_with_dsm_judges_height_only(self):
         state, manifest = self.run_map()
         self.assertGreater(len(manifest['blocks']), 1)
         self.assertEqual(manifest['image']['dsm']['alignment'], 'pixel')
         self.assertEqual(self.events[-1], 'semantic_close')
-        expected = {'class_pct', 'height_band_pct', 'height_stats', 'degradation'}   # 只输出指标和判定，不做可靠性标记
+        expected = {'class_pct', 'height_band_pct', 'height_stats', 'degradation', 'road_reference'}
         for block in manifest['blocks']:
             features = block['features']
             self.assertEqual(set(features), expected)
@@ -178,7 +201,7 @@ class BlockFeatureTests(unittest.TestCase):
         self.assertTrue(all(b['features']['height_band_pct'] for b in again['blocks']))
         self.assertIn('height', again['blocks'][0]['feature_vis'])
 
-    def test_missing_road_reference_is_reported_without_review(self):
+    def test_missing_road_reference_is_sent_to_height_review(self):
         from agent.map_preprocess.nodes.vlm_review import review_types
 
         with Image.open(self.image) as image:
@@ -189,10 +212,37 @@ class BlockFeatureTests(unittest.TestCase):
         self.assertTrue(manifest['blocks'])
         self.assertEqual(state['block_features']['missing_road_reference_block_ids'],
                          sorted(b['block_id'] for b in manifest['blocks']))
+        summary = state['block_features']
+        self.assertEqual(summary['review_candidate_block_ids'], summary['invalid_road_reference_block_ids'])
+        self.assertEqual(summary['height_degraded_blocks'], [])
+        self.assertEqual(summary['unavailable_review_data'], {})
+        from agent.map_preprocess.utils.final_summary import early_exit
+        self.assertIsNone(early_exit({'block_features': summary}))
+        from agent.map_preprocess.nodes.vlm_review import run_vlm_review
+        review = run_vlm_review(state['manifest_path'], self.config, dry_run=True)
+        self.assertEqual(review['jobs_by_type'], {'height': len(manifest['blocks']), 'semantic': 0})
         for block in manifest['blocks']:
-            self.assertIsNone(block['features']['height_stats'])
-            self.assertEqual(review_types(block), [])
-            self.assertIn('road_reference_missing', state['block_features']['unavailable_review_data'][block['block_id']])
+            features = block['features']
+            self.assertIsNone(features['height_stats'])
+            self.assertIsNone(features['height_band_pct'])
+            self.assertIsNone(features['degradation']['height_degraded'])
+            self.assertFalse(features['road_reference']['valid'])
+            self.assertEqual(features['road_reference']['attempts'][0]['reasons'], ['no_road_samples'])
+            self.assertEqual(review_types(block), ['height'])
+
+    def test_failed_feature_publication_restores_previous_outputs(self):
+        from unittest.mock import patch
+        state, manifest = self.run_map()
+        manifest_path = resolve_path(state['manifest_path'])
+        paths = [manifest_path, *(resolve_path(manifest['files'][key]) for key in
+                                 ('state', 'block_features', 'blocks_degraded'))]
+        before = [path.read_bytes() for path in paths]
+        with patch('agent.map_preprocess.utils.result_publication.publish_stage',
+                   side_effect=RuntimeError('publication failed')):
+            with self.assertRaisesRegex(RuntimeError, 'publication failed'):
+                run_block_features(manifest_path, replace(self.config, feature_vis_enabled=False),
+                                   semantic_segmenter=FakeSemantic(self.events))
+        self.assertEqual([path.read_bytes() for path in paths], before)
 
     def test_cache_skips_model_on_rerun(self):
         state, manifest = self.run_map()
@@ -298,6 +348,22 @@ class GeoDsmTests(unittest.TestCase):
         expected = (500010+.1*(np.arange(100)[::info['block_grid_factor']]+info['block_grid_factor']/2))-499990
         np.testing.assert_allclose(np.nanmedian(block, axis=0), expected[:block.shape[1]], atol=.6)
 
+    def test_nearest_alignment_preserves_nodata_and_dataset_mask(self):
+        import rasterio
+        from affine import Affine
+        transform = Affine(1., 0, 500000, 0, -1., 5000000)
+        data = np.full((8, 8), 100., np.float32)
+        data[:, 3] = -9999.
+        dsm = write_raster(self.root/'shifted.tif', data, 'EPSG:32633', transform)
+        rgb = write_raster(self.root/'shifted_rgb.tif', data, 'EPSG:32633',
+                           transform @ Affine.translation(.5, 0))
+        with rasterio.open(dsm, 'r+') as dataset:
+            mask = np.full(data.shape, 255, np.uint8)
+            mask[:, 5] = 0
+            dataset.write_mask(mask)
+        block = read_block_dsm(inspect_dsm(dsm, rgb, 1.), [0, 0, 8, 8])
+        np.testing.assert_array_equal(block[3], [100., 100., np.nan, 100., np.nan, 100., 100., np.nan])
+
     def test_no_overlap_fails(self):
         from affine import Affine
         far = write_raster(self.root/'far.tif', np.zeros((10, 10), np.float32), 'EPSG:32633',
@@ -308,6 +374,83 @@ class GeoDsmTests(unittest.TestCase):
 
 class MetricTests(unittest.TestCase):
     settings = GlobalPreprocessConfig(segmenter='dummy')
+
+    def test_cleaned_road_fallback_ignores_semantic_labels_and_invalid_dsm(self):
+        from agent.map_preprocess.nodes.block_features import _block_features
+        labels = np.full((15, 15), bf.OTHER, np.uint8)
+        labels[7, 7] = bf.BUILDING
+        labels[7, 8] = bf.PLANT
+        cleaned = np.zeros_like(labels, dtype=bool)
+        cleaned[7, 7:12] = True
+        dsm = np.full(labels.shape, 140., np.float32)
+        dsm[7, 7:12] = [102., 102.5, np.nan, 103.5, 104.]
+        block = {'global_xy': (7.5, 7.5), 'valid_global_bbox': (0, 0, 15, 15)}
+        semantic = {'mask': labels, 'confidence': np.ones(labels.shape)}
+        before, _ = _block_features(block, semantic, dsm, self.settings)
+        after, _ = _block_features(block, semantic, dsm, self.settings, cleaned_road=cleaned)
+        self.assertIsNone(before['height_stats'])
+        self.assertEqual(after['class_pct'], before['class_pct'])
+        self.assertEqual(after['height_stats']['base_ref'], 'cleaned_road')
+        self.assertEqual(after['height_stats']['base_dsm_m'], 103.)
+
+    def test_road_reference_rejects_unreliable_samples(self):
+        labels = np.full((15, 15), bf.OTHER, np.uint8)
+        labels[7, 5:10] = bf.ROAD
+        for samples, reason in [
+            ([100., 100., np.nan, -9999., 3e38], 'too_few_valid_samples'),
+            ([100., 100., 100., np.nan, -9999.], 'low_valid_sample_coverage'),
+            ([100., 100., 100., 105., 105.], 'unstable_road_elevation'),
+        ]:
+            with self.subTest(reason=reason):
+                dsm = np.full(labels.shape, 100., np.float32)
+                dsm[7, 5:10] = samples
+                settings = replace(self.settings, feature_road_ref_min_valid_pct=70.)
+                result = bf.dsm_height_features(dsm, labels, settings)
+                self.assertFalse(result['road_reference']['valid'])
+                self.assertIn(reason, result['road_reference']['attempts'][-1]['reasons'])
+                self.assertIsNone(result['height_band_pct'])
+
+    def test_road_reference_expands_when_center_samples_are_too_sparse(self):
+        labels = np.full((15, 15), bf.OTHER, np.uint8)
+        labels[7, [3, 4, 7]] = bf.ROAD
+        result = bf.dsm_height_features(np.full(labels.shape, 50., np.float32), labels, self.settings)
+        self.assertEqual(result['height_stats']['base_ref'], 'expanded_road')
+        self.assertIn('too_few_valid_samples', result['road_reference']['attempts'][0]['reasons'])
+
+    def test_twenty_metre_reference_and_center_step_prompt(self):
+        from agent.map_preprocess.nodes.vlm_review import model_input, review_types
+
+        labels = np.full((31, 31), bf.OTHER, np.uint8)
+        labels[15, 7:10] = bf.ROAD
+        dsm = np.full(labels.shape, 100., np.float32)
+        dsm[12:19, 12:19] = 104.
+        payload = {'block_id': 'E0_B0', 'review_type': 'height', 'image_extent_m': (31, 31),
+                   'center_image_xy': (15, 15), 'image_size_px': (31, 31),
+                   'context': {'context_extent_m': (100, 100)}}
+        for variant in ('step', 'nodata_gap', 'flat_center'):
+            with self.subTest(variant=variant):
+                surface = dsm.copy()
+                if variant == 'nodata_gap':
+                    surface[:, 10:12] = np.nan
+                elif variant == 'flat_center':
+                    surface[12:19, 12:19] = 100.
+                features = bf.dsm_height_features(surface, labels, self.settings)
+                self.assertEqual(features['road_reference']['window_m'], 20)
+                self.assertEqual(features['height_stats']['base_dsm_m'], 100.)
+                hit = features['height_stats']['center_step_above']
+                self.assertEqual(hit, variant == 'step')
+                self.assertEqual(review_types({'features': features}), ['height'] if hit else [])
+                description = model_input({**payload, 'center_step_above': hit})['image_description']
+                self.assertEqual('补充核查' in description, hit)
+                if hit:
+                    self.assertIn('车辆进入的隧道', description)
+                    self.assertIn('建筑是否实际占据道路中央', description)
+
+    def test_step_mask_ignores_nodata_before_subtraction(self):
+        dsm = np.full((11, 11), np.nan, np.float32)
+        dsm[5, 5] = 100.
+        with np.errstate(over='raise', invalid='raise'):
+            np.testing.assert_array_equal(bf.step_mask(dsm, 1., .5, 1.), ~np.isfinite(dsm))
 
     def test_height_bands_in_metres(self):
         # 负值与 NaN 不计入（dsm_height_features 已把超出容差的负值置为 NaN）
@@ -420,8 +563,9 @@ class MetricTests(unittest.TestCase):
             return _degradation({'class_pct': cls, 'height_band_pct': bands,
                                  'height_stats': None if bands is None else {'below_base_pct': below}})
         mixed = {'road': 30., 'building': 20., 'plant': 50., 'other': 0.}
-        # 语义：道路 12.4% 不满足 < 10%；道路 8% 且植被 87.8% 满足
-        self.assertFalse(run({'road': 12.4, 'building': 4.3, 'plant': 83.1, 'other': .2}, None)['semantic_degraded'])
+        # 语义：道路 12.4% 低于 15%，道路恰好 15% 不命中
+        self.assertTrue(run({'road': 12.4, 'building': 4.3, 'plant': 83.1, 'other': .2}, None)['semantic_degraded'])
+        self.assertFalse(run({'road': 15., 'building': 5., 'plant': 80., 'other': 0.}, None)['semantic_degraded'])
         result = run({'road': 8., 'building': 4., 'plant': 87.8, 'other': .2}, None)
         self.assertEqual((result['semantic_degraded'], result['semantic_road_pct'], result['semantic_plant_pct']), (True, 8., 87.8))
         self.assertEqual((result['height_degraded'], result['degraded']), (None, True))  # 没有 DSM：只看语义
@@ -457,6 +601,12 @@ class MetricTests(unittest.TestCase):
         labels = bf.semantic_labels(mask, confidence, .5)
         self.assertEqual(labels.tolist(), [[0, 3], [2, 255]])
         self.assertEqual(bf.class_pct(labels), {'road': 100/3, 'building': 0., 'plant': 100/3, 'other': 100/3})
+
+    def test_mixed_building_plant_triggers_semantic_degradation(self):
+        mixed = {'road': 10., 'building': 30., 'plant': 60., 'other': 0.}
+        self.assertTrue(_degradation({'class_pct': mixed, 'height_band_pct': None, 'height_stats': None})['semantic_degraded'])
+        with_other = {'road': 10., 'building': 20., 'plant': 50., 'other': 20.}
+        self.assertFalse(_degradation({'class_pct': with_other, 'height_band_pct': None, 'height_stats': None})['semantic_degraded'])
 
 
 if __name__ == '__main__':

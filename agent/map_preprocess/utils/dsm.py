@@ -21,6 +21,11 @@ from ..io import relative_path, resolve_path
 ABS_MAX_M = 1.0e4
 
 
+def valid_dsm_elevation(values: np.ndarray) -> np.ndarray:
+    """排除非有限值、常见的未声明填充值及超出支持范围的高程。"""
+    return np.isfinite(values) & (np.abs(values) <= ABS_MAX_M) & (values != -9999.)
+
+
 def _open(path: str | Path):
     import rasterio
     with warnings.catch_warnings():
@@ -96,17 +101,17 @@ def read_block_dsm(dsm: dict, bbox: list[int] | tuple[int, int, int, int]) -> np
         if dsm['alignment'] == 'pixel':
             from rasterio.windows import Window
             data = source.read(1, window=Window(x0, y0, x1-x0, y1-y0), out_shape=shape,
-                               resampling=Resampling.bilinear, masked=True)
+                               resampling=Resampling.nearest, masked=True)
             out = data.astype(np.float32).filled(np.nan)
         else:
             from affine import Affine
             from rasterio.crs import CRS
-            from rasterio.warp import reproject
-            import rasterio
+            from rasterio.vrt import WarpedVRT
             target = Affine(*dsm["rgb_transform"]) @ Affine.translation(x0, y0) @ Affine.scale(factor)
-            reproject(source=rasterio.band(source, 1), destination=out, src_nodata=nodata, dst_nodata=np.nan,
-                      dst_transform=target, dst_crs=CRS.from_string(dsm['rgb_crs']), resampling=Resampling.bilinear)
-    out[~np.isfinite(out) | (np.abs(out) > ABS_MAX_M)] = np.nan
+            with WarpedVRT(source, crs=dsm['rgb_crs'], transform=target, width=shape[1], height=shape[0],
+                           dtype='float32', nodata=np.nan, resampling=Resampling.nearest) as aligned:
+                out = aligned.read(1, masked=True).filled(np.nan)
+    out[~valid_dsm_elevation(out)] = np.nan
     if nodata is not None and math.isfinite(nodata):
         out[out == nodata] = np.nan
     return out

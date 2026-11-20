@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "退化区域辅助定位方式推荐输出 v2",
+  "title": "退化区域辅助定位方式推荐输出 v4",
   "type": "object",
   "additionalProperties": false,
-  "required": ["region_id", "visual_evidence", "assessment", "recommended_method", "reason", "limitations", "recommendation_status", "review_required"],
+  "required": ["region_id", "visual_evidence", "assessment", "recommended_method", "reason", "limitations", "recommendation_status"],
   "properties": {
     "region_id": {"type": "string", "description": "原样返回，每次请求绑定常量"},
     "visual_evidence": {
@@ -16,8 +16,9 @@
     "assessment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["lidar_inertial_slam", "wheel_imu_odometry", "sky_view", "obstruction_or_reflection"],
+      "required": ["structure_density", "lidar_inertial_slam", "wheel_imu_odometry", "sky_view", "obstruction_or_reflection"],
       "properties": {
+        "structure_density": {"type": "string", "enum": ["dense", "sparse_or_repetitive", "uncertain"], "description": "沿路三维结构疏密：dense（树带/林木、建筑、院墙、围栏、坡坎、停放车辆等三维地物密集）、sparse_or_repetitive（开阔农田/广场/平地或长直单一重复断面）、uncertain（无法判断）"},
         "lidar_inertial_slam": {"type": "string", "enum": ["suitable", "unsuitable", "uncertain"]},
         "wheel_imu_odometry": {"type": "string", "enum": ["suitable", "unsuitable", "uncertain"]},
         "sky_view": {"type": "string", "enum": ["open", "obstructed", "uncertain"], "description": "目标路线沿途是否有持续开阔的图像线索"},
@@ -33,7 +34,6 @@
       "items": {"type": "string", "minLength": 1, "maxLength": 120},
       "description": "本区域特有的风险和待验证条件"
     },
-    "recommendation_status": {"type": "string", "enum": ["provisional", "requires_validation"]},
-    "review_required": {"type": "boolean", "description": "区域环境混合、证据冲突或难以确定单一方案时为 true"}
+    "recommendation_status": {"type": "string", "enum": ["provisional", "requires_validation"]}
   }
 }

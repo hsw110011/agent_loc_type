@@ -15,7 +15,7 @@ from agent.map_preprocess import GlobalPreprocessConfig, load_manifest
 from agent.map_preprocess.io import read_json, write_json
 from agent.map_preprocess.nodes.global_pipeline import build_blocks_and_groups
 from agent.map_preprocess.utils.cross_edge_dedup import (arc_positions, covered_arc_intervals,
-    cross_edge_dedup, interpolate_positions, merge_intervals)
+    Candidate, cross_edge_dedup, interpolate_positions, merge_intervals, prune_redundant)
 from agent.map_preprocess.utils.global_blocks import blocks_for_edge, connect_blocks, group_blocks
 
 
@@ -90,6 +90,17 @@ class DedupTests(unittest.TestCase):
         groups = group_blocks(roads,blocks,cfg)
         self.assertEqual({g['edge_id'] for g in groups},{b['edge_id'] for b in blocks})
         self.assertTrue(all(by_id[identifier]['edge_id']==g['edge_id'] for g in groups for identifier in g['block_ids']))
+
+    def test_greedy_pruning_requires_high_area_overlap(self):
+        for separation, expected in ((25., 1), (25.01, 0)):
+            with self.subTest(separation=separation):
+                candidates = [Candidate('a', 0., 0., 0., np.array([0])),
+                              Candidate('b', 0., separation, 0., np.array([0]))]
+                counts = np.array([2])
+                kept, pruned = prune_redundant(candidates, counts, self.config, 100.)
+                self.assertEqual(pruned, expected)
+                self.assertEqual(len(kept), 2-expected)
+                self.assertEqual(counts[0], 2-expected)
 
     def test_parallel_streets_reuse_blocks_and_exact_intervals(self):
         roads = [edge('a',[[0,100],[300,100]]),edge('b',[[0,130],[300,130]])]
@@ -173,7 +184,7 @@ class DedupTests(unittest.TestCase):
             Image.new('RGB',(512,512),(20,30,40)).save(image)
             raw=root/'raw.json'
             write_json(raw,{'vertices':[{'node_id':str(i),'xy':p} for i,p in enumerate(
-                [[0,100],[300,100],[0,130],[300,130]])],
+                [[0,100],[300,100],[0,115],[300,115]])],
                 'edges':[{'u':'0','v':'1','confidence':1.},{'u':'2','v':'3','confidence':1.}], 'metadata':{}})
             path=root/'config.json'
             write_json(path,{'workflow':'global_blocks','segmenter':'dummy','dummy_graph_path':str(raw),
@@ -269,23 +280,23 @@ class WalkDedupTests(unittest.TestCase):
         for axis, endpoint in enumerate(([400, 500], [100, 800])):
             with self.subTest(axis=axis):
                 blocks, coverage, stats = self.run_walk([edge('a', [[100,500], endpoint])])
-                self.assertEqual([b['arc_length_m'] for b in blocks], [7.5, 78.75, 150., 221.25, 292.5])
+                self.assertEqual([b['arc_length_m'] for b in blocks], [28.125, 76.875, 125.625, 174.375, 223.125, 271.875])
                 for first, second in zip(blocks, blocks[1:]):
-                    self.assertAlmostEqual(first['global_bbox'][axis+2]-second['global_bbox'][axis], 3.75)
+                    self.assertAlmostEqual(first['global_bbox'][axis+2]-second['global_bbox'][axis], 26.25)
                 self.assertEqual(stats['pruned_redundant_blocks'], 0)
                 self.assertEqual(coverage[0]['covered_intervals_m'], [(0., 300.)])
 
     def test_short_tail_kept(self):
         blocks, coverage, stats = self.run_walk([edge('a', [[0,500], [76,500]])])
         self.assertEqual(len(blocks), 2)
-        self.assertAlmostEqual(blocks[1]['arc_length_m']-blocks[0]['arc_length_m'], 71.25)
+        self.assertAlmostEqual(blocks[1]['arc_length_m']-blocks[0]['arc_length_m'], 48.75)
         self.assertEqual(coverage[0]['covered_intervals_m'], [(0., 76.)])
         self.assertEqual(stats['road_coverage'], 1.)
 
     def test_high_overlap_does_not_erase_subsample_road_tail(self):
         roads = [edge('long', [[0, 500], [75, 500]]),
-                 edge('short', [[42.5, 500], [42.5, 537.6], [42.5, 536.7]])]
-        # 短边框重叠超过一半，但含一小段采样点没有命中的折返道路。
+                 edge('short', [[37.6, 498], [37.6, 537.6], [37.6, 536.7]])]
+        # 短边框重叠至少 75%，但含一小段采样点没有命中的折返道路。
         blocks, coverage, _ = self.run_walk(roads, replace(self.config, road_sample_spacing_m=10.))
         self.assertEqual(len(blocks), 2)
         self.assertAlmostEqual(coverage[1]['coverage_ratio'], 1.)
@@ -296,13 +307,32 @@ class WalkDedupTests(unittest.TestCase):
         self.assertEqual(len(blocks), 2)
         self.assertEqual(stats['pruned_redundant_blocks'], 0)
 
+    def test_junction_keeps_short_branch_below_overlap_threshold(self):
+        main = edge('main', [[0, 500], [75, 500]])
+        branch = edge('branch', [[75, 500], [75, 530]])
+        branch['u'] = main['v']
+        blocks, coverage, stats = self.run_walk([main, branch])
+        self.assertEqual({b['edge_id'] for b in blocks}, {'main', 'branch'})
+        self.assertEqual(stats['pruned_redundant_blocks'], 0)
+        self.assertTrue(all(record['coverage_ratio'] == 1. for record in coverage))
+
+    def test_prune_requires_at_least_75_percent_area_overlap(self):
+        for separation, expected in ((18.75, 1), (18.76, 0)):
+            with self.subTest(separation=separation):
+                roads = [edge('long', [[0, 500], [75, 500]]),
+                         edge('short', [[30, 500+separation], [45, 500+separation]])]
+                blocks, coverage, stats = self.run_walk(roads)
+                self.assertEqual(len(blocks), 2-expected)
+                self.assertEqual(stats['pruned_redundant_blocks'], expected)
+                self.assertTrue(all(record['coverage_ratio'] == 1. for record in coverage))
+
     def test_long_edge_first_and_cross_edge_covered(self):
         roads=[edge('long',[[0,500],[360,500]]),edge('short',[[180,500],[180,520]])]
         blocks, coverage, stats = self.run_walk(roads)
         self.assertEqual({b['edge_id'] for b in blocks},{'long'})
         self.assertEqual(stats['pruned_redundant_blocks'], 1)
         self.assertEqual(coverage[1]['covered_intervals_m'], [(0., 20.)])
-        self.assertEqual(roads[1]['covering_block_ids'], ['Elong_B2'])
+        self.assertEqual(roads[1]['covering_block_ids'], ['Elong_B3'])
 
     def test_deterministic_and_validation(self):
         roads=[edge('a',[[0,500],[300,500]]),edge('b',[[150,300],[150,700]])]

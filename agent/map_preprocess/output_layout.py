@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .io import resolve_path
 
+CLEANED_ROAD_REFERENCE_MASK = 'cleaned_road_reference.npy'
 STATE_DIR = 'state'
 VIS_DIR = 'visualization'
 NODE_STATES_DIR = 'node_states'

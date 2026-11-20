@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 import sys
 
@@ -9,6 +10,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from agent.map_preprocess.config import load_config
+from agent.map_preprocess.global_config import ANALYSIS_MODES
 from agent.map_preprocess.graph import run_pipeline
 from agent.map_preprocess.io import resolve_path
 
@@ -18,9 +20,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--image', type=Path, required=True, help='uint8 RGB 图片路径（道路拓扑 + 语义）')
     parser.add_argument('--dsm', type=Path, help='显式指定 DSM（米）；省略时查找与 *_dom.tif 同目录的 *_dsm.tif')
     parser.add_argument('--config', type=Path, default=Path('agent/map_preprocess/pipeline.yaml'), help='JSON/YAML 配置路径，默认 agent/map_preprocess/pipeline.yaml')
+    parser.add_argument("--analysis", choices=ANALYSIS_MODES, help="退化分析模式，省略时沿用配置（默认 auto）")
     args = parser.parse_args(argv)
     try:
-        state = run_pipeline(str(args.image), load_config(args.config),
+        config = load_config(args.config)
+        if args.analysis is not None:
+            config = replace(config, analysis=args.analysis)
+        state = run_pipeline(str(args.image), config,
                              dsm_path=str(args.dsm) if args.dsm else None, console=True)
         if state.get('final_summary'):
             print(f"最终结论：{state['final_summary']['message']}")

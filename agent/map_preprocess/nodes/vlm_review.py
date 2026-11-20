@@ -1,16 +1,15 @@
 """Node 6：退化块 VLM 复核（vlm_review_blocks）。
 
-按 Node 5 命中的初筛规则分流，两套 prompt 系统独立：
+按 Node 5 的候选支路分流；有有效 DSM 时，路面基准无效或道路中心向上阶跃也进入高程复核。两套 prompt 系统独立：
   semantic：局部 RGB（无标记）+ 局部语义分割（同范围）+ 整体语义上下文（通常为 100 m，RGB 叠半透明语义和目标框）
   height：整体 RGB 上下文（默认 100 m，标目标框）+ 局部 RGB（无标记）+ 局部 DSM 伪彩色
                        （DSM − 上下文范围有效 DSM 的 P20，固定 [-2, 8] m 线性 Viridis 色标，所有块同一色标）
 局部图统一裁去地图外部分、保留长宽比例，同尺寸、像素一一对应（图上不画图例，颜色含义、色标和参考高程由本次图像说明提供）；每张图前插入文字标签。
 
-VLM 独立判断：请求不含 Node 5 的结论、触发原因、阈值和初筛结果，只说明这是待评估的道路区域。
+VLM 独立判断：请求不发送 Node 5 的初筛结论、阈值或统计值；道路中心向上阶跃时附条件核查提示。
 模型只接收图像说明、实际覆盖宽高、中心位置及颜色含义；完整几何与统计留作本地元数据。Schema 保留英文字段名，判断枚举为中文，每个判定字段输出独立置信度。
-退化结论来自模型 verdict；程序单独计算可通行性和是否保留，并记录结构字段的置信度和一致性。
+退化结论来自模型 verdict；程序校验证据并记录结构字段的置信度和一致性。
 本阶段不判断定位方式切换或传感器可见性。Node 6 不判断范围扩展，退化场景的范围就是当前块；扩展由 Node 7 单独记录。
-删除的块从 manifest blocks 以及 edges/groups/前后继引用中移除，记录在 extensions.vlm_review.removed_blocks；
 保留的块写 blocks[].vlm_review。首次运行备份 manifest，重跑从备份开始。
 """
 from __future__ import annotations
@@ -43,9 +42,16 @@ PATCH_BOX_RGB = (255, 230, 0)
 
 
 def review_types(block: dict) -> list[str]:
-    """条件分流：语义退化 → semantic，高度退化 → height（两者都退化时两套各复核一次）。"""
-    d = (block.get('features') or {}).get('degradation') or {}
-    return [name for name, key in (('semantic', 'semantic_degraded'), ('height', 'height_degraded')) if d.get(key)]
+    """规则命中进入对应支路；有有效 DSM 时，路面基准无效或中心向上阶跃也进入高程复核。"""
+    features = block.get('features') or {}
+    d = features.get('degradation') or {}
+    reference = features.get('road_reference') or {}
+    kinds = ['semantic'] if d.get('semantic_degraded') else []
+    height_fallback = reference.get('valid') is False and 'height' in block.get('review_types_available', ())
+    center_step_above = (features.get('height_stats') or {}).get('center_step_above')
+    if d.get('height_degraded') or height_fallback or center_step_above:
+        kinds.append('height')
+    return kinds
 
 
 def backup_path(manifest_path: str | Path) -> Path:
@@ -72,7 +78,8 @@ def _payload(block: dict, review_type: str, edge: dict | None, geometry: dict, s
                'road_source': (edge or {}).get('source', 'samroad')}
     if review_type == 'semantic':
         return {**payload, **stats}
-    return {**payload, **height}
+    stats = (block.get('features') or {}).get('height_stats') or {}
+    return {**payload, **height, 'center_step_above': bool(stats.get('center_step_above'))}
 
 
 def model_input(payload: dict) -> dict:
@@ -101,6 +108,10 @@ def model_input(payload: dict) -> dict:
                    '第 2 张：局部 RGB（local_rgb）。从原始卫星 RGB 裁出的目标区域，不叠加任何标记，用于辨认目标道路及高程结构对应的真实地物。\n'
                    '第 3 张：局部 DSM 伪彩色高程图（local_dsm）。与第 2 张覆盖完全相同、像素一一对应，由 DSM 表面高程减去周边低处的着色基准后生成，显示的是相对高度，可能对应路面、树冠、屋顶或桥面。图中没有叠加 RGB、影像阴影或标记。\n'
                    f'第 2、3 张实际覆盖宽 {width:.4g} 米、高 {height:.4g} 米；{where}\n')
+    if payload.get('center_step_above'):
+        description += ('补充核查：请对照 RGB 和 DSM，检查道路中央是否有树冠、屋顶或其他俯视遮挡，'
+                        '道路是否可能延伸到可供车辆进入的隧道或下穿入口，或建筑是否实际占据道路中央。'
+                        '沿道路走向核对入口、遮挡前后的道路接续和结构位置，证据不足时保留不确定。\n')
     return {'block_id': payload['block_id'], 'review_type': kind, 'image_description': description+crop_note+'\n'+color_description(kind)}
 
 
@@ -316,28 +327,37 @@ def failure_fields(exc: Exception) -> dict:
 
 
 def review_one(job: dict, client: Any, systems: dict, config: GlobalPreprocessConfig, result_dir: Path) -> dict:
-    from agent.vlm.common import _generation_schema, _parse
+    from jsonschema import ValidationError
+    from agent.vlm.common import VLMError, _generation_schema, _parse
     system = systems[job['review_type']]
     record = {'block_id': job['block_id'], 'review_type': job['review_type'], 'images': job['images'],
-              'schema_version': system['rules']['schema_version'], 'coverage': coverage(job['payload'])}
+              'schema_version': system['rules']['schema_version'], 'coverage': coverage(job['payload']), 'attempts': []}
     schema = job_schema(job, system)
     budget = config.vlm_review_thinking_budget
     effort = config.vlm_review_reasoning_effort
     thinking = {'reasoning_effort': effort} if budget != 0 and effort is not None else {}
-    try:
-        result = client.infer(user_prompt(job, system), images=[resolve_path(p) for p in job['images']],
-                              system=system['prompt'], max_tokens=config.vlm_review_max_tokens, temperature=0.0,
-                              json_output=True, output_schema=_generation_schema(schema),
-                              image_labels=review_image_labels(job['review_type']),
-                              enable_thinking=budget != 0, thinking_token_budget=budget or None, **thinking)
-        record.update({'raw_text': result.text, 'reasoning': getattr(result, 'reasoning', ''), 'usage': result.usage,
-                       'latency_seconds': round(result.latency_seconds, 2), 'inference_seconds': round(getattr(result, 'inference_seconds', 0.), 2)})
-        output = _parse(result.text)
-        check_output(job, output, schema)
-        derived = derive(output, system, evidence_problem='topic_no_data' if has_no_topic_data(job) else None)
-        record.update({'status': 'ok', 'output': output, 'derived': derived})
-    except Exception as exc:  # 单块失败不影响其它块；该块按未复核保留
-        record.update(failure_fields(exc))
+    for attempt in range(config.vlm_review_max_retries+1):
+        try:
+            result = client.infer(user_prompt(job, system), images=[resolve_path(p) for p in job['images']],
+                                  system=system['prompt'], max_tokens=config.vlm_review_max_tokens, temperature=0.0,
+                                  json_output=True, output_schema=_generation_schema(schema),
+                                  image_labels=review_image_labels(job['review_type']),
+                                  enable_thinking=budget != 0, thinking_token_budget=budget or None, **thinking)
+            record.update({'raw_text': result.text, 'reasoning': getattr(result, 'reasoning', ''), 'usage': result.usage,
+                           'latency_seconds': round(result.latency_seconds, 2), 'inference_seconds': round(getattr(result, 'inference_seconds', 0.), 2)})
+            output = _parse(result.text)
+            check_output(job, output, schema)
+            derived = derive(output, system, evidence_problem='topic_no_data' if has_no_topic_data(job) else None)
+            record.update({'status': 'ok', 'output': output, 'derived': derived})
+            record.pop('error', None)
+            break
+        except (VLMError, ValidationError, ValueError) as exc:
+            record.update(failure_fields(exc))
+            record['attempts'].append({'attempt': attempt+1, 'error': record['error']})
+        except Exception as exc:  # 单块失败不影响其它块；该块按未复核保留
+            record.update(failure_fields(exc))
+            record['attempts'].append({'attempt': attempt+1, 'error': record['error']})
+            break
     write_json(result_dir/f"{job['block_id']}_{job['review_type']}.json", record)
     return record
 
@@ -347,40 +367,18 @@ def _check(output: dict) -> dict:
 
 
 def decide(block: dict, records: list[dict]) -> dict:
-    """合并同一块的复核结果。
-
-    - 有充分不可行驶证据且无相反结论 → 删除；道路判断未知或互相矛盾则保留待确认；
-    - 判退化（keep=true）的复核类型即该块的退化场景类型；都不退化 → 不算退化场景（degraded_scene=false）。
-      semantic 的退化结论不看地面类型，地面未知时同样成立；height 仍要求确认可行驶；
-    - Node 6 不判断范围扩展，recommended_size_m / expand / review_global_bbox 固定为当前块（扩展由 Node 7 单独记录）。
-    - 全部复核失败 → 未验证（degraded_scene=None），块保留但不进退化场景清单。
-    """
+    """按各支路独立的退化证据合并，不删除道路块。"""
     ok = [r for r in records if r['status'] == 'ok']
     fixed = {'recommended_size_m': block['size_m'], 'expand': False, 'review_global_bbox': block['valid_global_bbox']}
     decision = {'reviews': {r['review_type']: {'status': r['status'], 'coverage': r.get('coverage'),
                                                **({'output': r['output'], 'derived': r['derived']} if r['status'] == 'ok'
                                                   else {'error': r['error']})} for r in records}}
-    if not ok:
-        return {**decision, **fixed, 'status': 'error', 'is_drivable': None, 'degraded_scene': None, 'scene_types': []}
-    road_results = {r['derived']['is_drivable'] for r in ok} - {None}
-    is_drivable = next(iter(road_results)) if len(road_results) == 1 else None
     confirmed = {r['review_type']: r['derived']['degraded'] if r['status'] == 'ok' else None for r in records}
-    conflict = len(road_results) > 1
-    scenes = [r for r in ok if r['derived']['keep']] if not conflict and is_drivable is not False else []
-    # 退化结论不看地面类型时，地面未知也不妨碍给出结论
-    area_settled = is_drivable is True or (not conflict and all(r['derived'].get('decision_ignores_area') for r in ok))
-    if scenes:
-        scene = True
-    elif is_drivable is False or (area_settled and all(v is False for v in confirmed.values())):
-        scene = False
-    else:
-        scene = None
-    # 已确认不可通行时退化不适用（Rule 给 not_drivable/null），只有失败的类型才算待确认
-    unknown = ([r['review_type'] for r in records if r['status'] != 'ok'] if is_drivable is False else
-               [kind for kind, value in confirmed.items() if value is None])
-    status = 'partial' if len(ok) < len(records) else 'uncertain' if unknown or not (area_settled or is_drivable is False) else 'ok'
-    return {**decision, **fixed, 'status': status, 'is_drivable': is_drivable,
-            'drivable_conflict': conflict, 'unresolved_review_types': unknown,
+    scenes = [r for r in ok if r['derived']['keep']]
+    unknown = [kind for kind, value in confirmed.items() if value is None]
+    scene = True if scenes else False if confirmed and not unknown else None
+    status = 'error' if not ok else 'partial' if len(ok) < len(records) else 'uncertain' if unknown else 'ok'
+    return {**decision, **fixed, 'status': status, 'unresolved_review_types': unknown,
             'degradation_confirmed': confirmed, 'degraded_scene': scene,
             'scene_types': [r['review_type'] for r in scenes]}
 
@@ -392,12 +390,8 @@ def scene_record(block: dict) -> dict:
                'height': {'reasons': d.get('height_reasons'), 'flat_pct': d.get('height_flat_pct'),
                           'below_road_pct': d.get('height_below_pct')}}
     outputs = {k: v['output'] for k, v in review['reviews'].items() if v['status'] == 'ok' and k in review['scene_types']}
-    # 通行证据可能来自未判退化的另一种复核；只采用归一化后支持通行的类型。
-    areas = {r['derived']['effective_area_type'] for r in review['reviews'].values()
-             if r['status'] == 'ok' and r['derived']['is_drivable'] is True}
-    area = next(iter(areas)) if len(areas) == 1 else '未知'
     return {'block_id': block['block_id'], 'edge_id': block['edge_id'], 'global_xy': block['global_xy'],
-            'scene_types': review['scene_types'], 'area_type': area, 'size_m': review['recommended_size_m'], 'expand': review['expand'],
+            'scene_types': review['scene_types'], 'size_m': review['recommended_size_m'], 'expand': review['expand'],
             'global_bbox': review['review_global_bbox'], 'original_bbox': block['valid_global_bbox'],
             'rule_trigger': {k: reasons[k] for k in review['scene_types']},
             'vlm': {k: {'pattern': review['reviews'][k]['derived']['reason_code'],
@@ -409,27 +403,10 @@ def scene_record(block: dict) -> dict:
                         **{field: _check(o)[field] for field in ('road_comparisons', 'height_comparisons', 'longitudinal_comparisons', 'verdict') if field in _check(o)},
                         'field_confidence': {f: v for f, v in _check(o).items() if f.endswith('_confidence')},
                         'uncertainty': _check(o)['uncertainty'],
-                        'drivable_confidence': o['drivable_check']['area_type_confidence'],
                         'data_confidence': o['data_check']['data_confidence']} for k, o in outputs.items()}}
 
 
-def remove_blocks(manifest: dict, removed: set[str]) -> None:
-    """从 blocks 与 edges/groups/前后继引用中去掉被删除的块（覆盖统计保持复核前的值）。"""
-    manifest['blocks'] = [b for b in manifest['blocks'] if b['block_id'] not in removed]
-    for block in manifest['blocks']:
-        for key in ('predecessor_ids', 'successor_ids'):
-            if key in block:
-                block[key] = [x for x in block[key] if x not in removed]
-    for edge in manifest['edges']:
-        for key in ('block_ids', 'covering_block_ids'):
-            if key in edge:
-                edge[key] = [x for x in edge[key] if x not in removed]
-    for group in manifest.get('groups') or []:
-        group['block_ids'] = [x for x in group['block_ids'] if x not in removed]
-    manifest['groups'] = [g for g in manifest.get('groups') or [] if g['block_ids']]
-
-
-def render_overview(manifest: dict, config: GlobalPreprocessConfig, removed: list[dict], output: Path) -> Path:
+def render_overview(manifest: dict, config: GlobalPreprocessConfig, output: Path) -> Path:
     """全图复核结果：退化场景（绿框）、不退化（白虚框）、不是道路已删除（红叉）、复核失败（黄框）。"""
     from PIL import ImageDraw
     from ..utils.global_render import read_preview
@@ -442,7 +419,7 @@ def render_overview(manifest: dict, config: GlobalPreprocessConfig, removed: lis
     box = lambda b: [v*scale for v in b]
     for edge in manifest['edges']:
         draw.line([(x*scale, y*scale) for x, y in edge['polyline_xy']], fill=(255, 255, 255), width=width)
-    counts = {'scene': 0, 'rejected': 0, 'removed': len(removed), 'error': 0}
+    counts = {'scene': 0, 'rejected': 0, 'error': 0}
     label = lambda b, color: draw.text(((b[0]+b[2])/2, (b[1]+b[3])/2), block['block_id'], fill=color, font=font,
                                        anchor='mm', stroke_width=2, stroke_fill='black')
     for block in manifest['blocks']:
@@ -461,15 +438,9 @@ def render_overview(manifest: dict, config: GlobalPreprocessConfig, removed: lis
             counts['rejected'] += 1
             vi._dashed_rect(draw, rect, (255, 255, 255), 2*width, max(6, side//200))
         label(rect, 'white')
-    for block in removed:
-        x0, y0, x1, y1 = box(block['valid_global_bbox'])
-        draw.rectangle([x0, y0, x1, y1], outline=(255, 30, 30), width=2*width)
-        draw.line([(x0, y0), (x1, y1)], fill=(255, 30, 30), width=width)
-        draw.line([(x0, y1), (x1, y0)], fill=(255, 30, 30), width=width)
-        draw.text(((x0+x1)/2, y0-4), block['block_id'], fill=(255, 80, 80), font=font, anchor='md', stroke_width=2, stroke_fill='black')
     items = [((40, 220, 60), f"degraded scene: {counts['scene']}"),
              ((255, 255, 255), f"not degraded (dashed): {counts['rejected']}"),
-             ((255, 30, 30), f"not drivable (removed): {counts['removed']}"), ((255, 220, 0), f"unverified: {counts['error']}")]
+             ((255, 220, 0), f"unverified: {counts['error']}")]
     output.parent.mkdir(parents=True, exist_ok=True)
     vi.add_legend(image, items, 'VLM verification of degraded blocks').save(output)
     return output
@@ -549,16 +520,11 @@ def run_vlm_review(manifest_path: str | Path, config: GlobalPreprocessConfig, *,
         by_block: dict[str, list[dict]] = {}
         for record in records:
             by_block.setdefault(record['block_id'], []).append(record)
-        removed = []
         for block, _ in selected:
             decision = decide(block, by_block.get(block['block_id'], []))
             decision['review_global_bbox'] = [int(v) for v in decision['review_global_bbox']]
-            if decision['is_drivable'] is False:
-                removed.append({**block, 'vlm_review': decision})
-            else:
-                block['vlm_review'] = decision
-        remove_blocks(manifest, {b['block_id'] for b in removed})
-        overview = render_overview(manifest, config, removed, overview_path)
+            block['vlm_review'] = decision
+        overview = render_overview(manifest, config, overview_path)
         reviewed = [b for b in manifest['blocks'] if b.get('vlm_review')]
         scenes = [scene_record(b) for b in reviewed if b['vlm_review']['degraded_scene']]
         summary.update({
@@ -566,7 +532,7 @@ def run_vlm_review(manifest_path: str | Path, config: GlobalPreprocessConfig, *,
             'degraded_scene_count': len(scenes),
             'degraded_scene_ids': [s['block_id'] for s in scenes],
             'rejected_block_ids': sorted(b['block_id'] for b in reviewed if b['vlm_review']['degraded_scene'] is False),
-            'removed_block_ids': sorted(b['block_id'] for b in removed),
+            'removed_block_ids': [],
             'discarded_insufficient_evidence_ids': sorted(
                 b['block_id'] for b in reviewed
                 if b['vlm_review']['degraded_scene'] is None
@@ -576,9 +542,9 @@ def run_vlm_review(manifest_path: str | Path, config: GlobalPreprocessConfig, *,
             'unresolved_branch_block_ids': sorted(b['block_id'] for b in reviewed if b['vlm_review'].get('unresolved_review_types')),
             'errors': [{'block_id': r['block_id'], 'review_type': r['review_type'], 'error': r['error']}
                        for r in records if r['status'] == 'error'],
-            'block_count_before': len(manifest['blocks'])+len(removed), 'block_count_after': len(manifest['blocks']),
+            'block_count_before': len(manifest['blocks']), 'block_count_after': len(manifest['blocks']),
             'degraded_scenes': relative_path(scenes_path), 'overview': relative_path(overview),
-            'note': '删除块后 coverage/dedup_stats 仍为复核前统计；复核前 manifest 备份为 state/' + BACKUP_NAME})
+            'note': '复核前 manifest 备份为 state/' + BACKUP_NAME})
         write_json(scenes_path, {'task_id': manifest.get('task_id'), 'image': manifest['image']['path'],
                                  'resolution_m_per_px': manifest['resolution_m_per_px'],
                                  'count': len(scenes),
@@ -588,12 +554,12 @@ def run_vlm_review(manifest_path: str | Path, config: GlobalPreprocessConfig, *,
         if diagnostic:
             return summary
         manifest['files']['degraded_scenes'] = relative_path(scenes_path)
-        manifest.setdefault('extensions', {})['vlm_review'] = {**summary, 'removed_blocks': removed}
+        manifest.setdefault('extensions', {})['vlm_review'] = summary
         manifest['files']['vlm_review'] = relative_path(summary_path)
         manifest['files']['vlm_review_overview'] = relative_path(overview)
         publish_stage(manifest_path, manifest, 'vlm_review')
-        logger.info('Node 6 完成：退化场景 %d，不退化 %d，不可行驶删除 %d，失败 %d', len(scenes),
-                    len(summary['rejected_block_ids']), len(removed), len(summary['errors']))
+        logger.info('Node 6 完成：退化场景 %d，不退化 %d，失败 %d', len(scenes),
+                    len(summary['rejected_block_ids']), len(summary['errors']))
         return summary
 
 

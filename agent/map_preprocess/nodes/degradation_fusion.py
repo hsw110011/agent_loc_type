@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from ..global_config import GlobalPreprocessConfig
+from ..global_config import GlobalPreprocessConfig, PIPELINE_VERSION
 from ..io import load_manifest, read_json, relative_path, resolve_path, write_json
 from .. import output_layout as layout
 from ..state import PreprocessState
@@ -31,7 +31,7 @@ def patch_from_extent(extent: dict, resolution: float) -> dict:
     基准范围不完整（stop_reason=base_incomplete）时用 Node 6 实际判断的范围，不声明完整基准窗口。"""
     size = extent['max_size_m']
     tier = next((item for item in extent['tiers'] if item['size_m'] == size), {})
-    bbox = vi.review_window(extent, size, resolution)
+    bbox = tier.get('bbox') or vi.review_window(extent, size, resolution)
     if extent.get('stop_reason') == 'base_incomplete':
         bbox = ((extent.get('node6') or {}).get('coverage') or {}).get('image_global_bbox') or bbox
     return {'patch_id': patch_id_of(extent), 'block_id': extent['block_id'], 'review_type': extent['review_type'], 'size_m': size,
@@ -113,22 +113,25 @@ def run_degradation_fusion(manifest_path: str | Path, config: GlobalPreprocessCo
         logger.warning('Node 8：丢弃无效 Patch %s（%s）', item.get('patch_id'), item['reason'])
     task_dir = layout.task_dir_of_manifest(manifest_path)
     output = layout.state_dir(task_dir)/'degradation_regions.json'
-    overview = render_overview(manifest, config, regions, layout.figure(task_dir, 'degradation_fusion'))
-    write_json(output, {'task_id': manifest.get('task_id'), 'image': manifest['image']['path'], 'resolution_m_per_px': resolution,
-                        'coordinate_system': 'global_pixel', 'overlap_rule': 'strict_positive_area',
-                        'fusion_types': list(config.degradation_fusion_types), 'cross_type': config.degradation_fusion_cross_type,
-                        'meaning': 'union_polygon 是已确认窗口的并集；bbox 仅用于裁剪、索引和可视化，其中超出并集的部分未经验证',
-                        'count': len(regions), 'regions': regions, 'excluded': excluded, 'rejected': rejected,
-                        'not_degraded': not_degraded})
-    summary = {'status': 'completed', 'patch_count': sum(region['source_patch_count'] for region in regions),
-               'region_count': len(regions), 'merged_region_count': sum(region['source_patch_count'] > 1 for region in regions),
-               'excluded_count': len(excluded), 'excluded_patch_ids': [item['patch_id'] for item in excluded],
-               'not_degraded_count': len(not_degraded), 'rejected_count': len(rejected), 'degradation_regions': relative_path(output),
-               'overview': relative_path(overview)}
-    manifest.setdefault('extensions', {})['degradation_fusion'] = summary
-    manifest['files'].update({'degradation_regions': relative_path(output), 'degradation_fusion_overview': relative_path(overview)})
-    from ..utils.result_publication import publish_stage
-    publish_stage(manifest_path, manifest, 'degradation_fusion')
+    from ..utils.result_publication import protect_stage_outputs
+    overview_path = layout.figure(task_dir, 'degradation_fusion')
+    with protect_stage_outputs(manifest_path, (output, overview_path)):
+        overview = render_overview(manifest, config, regions, overview_path)
+        write_json(output, {'pipeline_version': PIPELINE_VERSION, 'task_id': manifest.get('task_id'), 'image': manifest['image']['path'], 'resolution_m_per_px': resolution,
+                            'coordinate_system': 'global_pixel', 'overlap_rule': 'strict_positive_area',
+                            'fusion_types': list(config.degradation_fusion_types), 'cross_type': config.degradation_fusion_cross_type,
+                            'meaning': 'union_polygon 是已确认窗口的并集；bbox 仅用于裁剪、索引和可视化，其中超出并集的部分未经验证',
+                            'count': len(regions), 'regions': regions, 'excluded': excluded, 'rejected': rejected,
+                            'not_degraded': not_degraded})
+        summary = {'status': 'completed', 'pipeline_version': PIPELINE_VERSION, 'patch_count': sum(region['source_patch_count'] for region in regions),
+                   'region_count': len(regions), 'merged_region_count': sum(region['source_patch_count'] > 1 for region in regions),
+                   'excluded_count': len(excluded), 'excluded_patch_ids': [item['patch_id'] for item in excluded],
+                   'not_degraded_count': len(not_degraded), 'rejected_count': len(rejected), 'degradation_regions': relative_path(output),
+                   'overview': relative_path(overview)}
+        manifest.setdefault('extensions', {})['degradation_fusion'] = summary
+        manifest['files'].update({'degradation_regions': relative_path(output), 'degradation_fusion_overview': relative_path(overview)})
+        from ..utils.result_publication import publish_stage
+        publish_stage(manifest_path, manifest, 'degradation_fusion')
     logger.info('Node 8 完成：%d 个 Patch → %d 个区域（%d 个由多个 Patch 融合），未进入融合 %d，Node 6 不退化 %d，无效 %d',
                 summary['patch_count'], len(regions), summary['merged_region_count'], len(excluded), len(not_degraded), len(rejected))
     return summary

@@ -66,7 +66,9 @@ def base_tier(block: dict, kind: str, size: float) -> dict:
     review = block['vlm_review']['reviews'][kind]
     derived, output = review['derived'], review['output']
     check = _check(output)
+    bbox = (review.get('coverage') or {}).get('image_global_bbox')
     return {'size_m': size, 'state': '退化', 'source': 'node6',
+            **({'bbox': bbox} if bbox else {}),
             'decision_trace': derived.get('decision_trace'), 'degradation_type': derived['degradation_type'],
             'reason_code': derived['reason_code'], 'confirmed_reasons': derived['matched_reasons'],
             'evidence': check['evidence'], 'field_confidence': _confidences(check),
@@ -116,23 +118,38 @@ def base_only(block: dict, kind: str, config: GlobalPreprocessConfig, rules: dic
             'tiers': tiers, 'base_problem': problem}
 
 
+def inward_window(block: dict, extent_m: float, resolution: float, image_size: tuple[int, int]) -> list[int]:
+    """以块中心为基准；超出图像边界且图像尺寸足够时向内平移，保留完整正方形窗口。"""
+    x0, y0, x1, y1 = vi.review_window(block, extent_m, resolution)
+    side_x, side_y = x1-x0, y1-y0
+    width, height = image_size
+    if side_x <= width:
+        x0 = max(0, min(x0, width-side_x))
+        x1 = x0+side_x
+    if side_y <= height:
+        y0 = max(0, min(y0, height-side_y))
+        y1 = y0+side_y
+    return [x0, y0, x1, y1]
+
+
 def base_problem(block: dict, kind: str, window: list[int], grids: dict, image_size: tuple[int, int], resolution: float,
                  size: float) -> dict | None:
     """核对 Node 6 实际覆盖与支路数据足迹，返回不完整的说明；完整时返回 None。"""
     coverage = block['vlm_review']['reviews'][kind].get('coverage') or {}
-    extent, bbox = coverage.get('image_extent_m'), coverage.get('image_global_bbox')
-    if not extent or not bbox or bbox != window or min(extent) < size-resolution:
-        return {'node6_coverage': coverage, 'expected_bbox': window}
-    missing = ei.uncovered(grids, kind, window, image_size)
+    bbox = coverage.get('image_global_bbox')
+    clipped_base, _ = vi._clip(window, *image_size)
+    if clipped_base is None or not bbox or bbox != clipped_base:
+        return {'node6_coverage': coverage, 'expected_bbox': clipped_base}
+    missing = ei.uncovered(grids, kind, bbox, image_size)
     return {'missing_sources': missing} if missing else None
 
 
 def valid_tiers(block: dict, kind: str, sizes: list[float], grids: dict, image_size: tuple[int, int],
                 resolution: float) -> tuple[list[float], dict]:
-    """同心窗口：第一个不完整的档位之后全部剔除。"""
+    """同心或贴边内移窗口：第一个不完整的档位之后全部剔除。"""
     valid, checks = [], {}
     for size in sizes:
-        missing = ei.uncovered(grids, kind, vi.review_window(block, size, resolution), image_size)
+        missing = ei.uncovered(grids, kind, inward_window(block, size, resolution, image_size), image_size)
         checks[f'{size:g}'] = missing
         if missing:
             break
@@ -162,7 +179,9 @@ def prepare_branch(manifest: dict, block: dict, kind: str, valid: list[float], l
     size = (manifest['image']['width'], manifest['image']['height'])
     px = config.vlm_expansion_image_px
     sizes = [base_size(config), *valid]
-    windows = {s: vi.review_window(block, s, resolution) for s in sizes}
+    base_bbox = (block['vlm_review']['reviews'][kind].get('coverage') or {}).get('image_global_bbox') or inward_window(
+        block, base_size(config), resolution, size)
+    windows = {base_size(config): base_bbox, **{s: inward_window(block, s, resolution, size) for s in valid}}
     outer = windows[sizes[-1]]
     height = {}
     if kind == 'height':   # 沿用 Node 6 的着色基准和色标
@@ -192,7 +211,6 @@ def prepare_branch(manifest: dict, block: dict, kind: str, valid: list[float], l
                'm_per_image_px': [span*resolution/px]*2, 'center_image_xy': list(center),
                'frames': {f'{s:g}': box for s, box in frames}, 'windows': {f'{s:g}': w for s, w in windows.items()},
                'ring_nodata_pct': ring_stats(missing, windows, outer), **height,
-               'area_type': review['derived']['effective_area_type'],
                'node6': {'degradation_type': review['derived']['degradation_type'],
                          'matched_reasons': review['derived']['matched_reasons'],
                          'evidence': _check(review['output']).get('verdict', {}).get('reason')
@@ -201,7 +219,7 @@ def prepare_branch(manifest: dict, block: dict, kind: str, valid: list[float], l
 
 
 def model_input(payload: dict) -> dict:
-    """模型只接收区域标识、双图说明、档位及继承的地面类型；Node 6 判定和精确几何留在 metadata。"""
+    """模型只接收区域标识、双图说明和档位；Node 6 判定和精确几何留在 metadata。"""
     kind, base, valid = payload['review_type'], payload['base_size_m'], payload['valid_tiers_m']
     width, height = payload['image_extent_m']
     styles = [f'{ei.tier_style(index)[0]}={size:g} m' for index, size in enumerate((base, *valid))]
@@ -219,8 +237,7 @@ def model_input(payload: dict) -> dict:
                    '各框线型：'+'，'.join(styles)+'。最外层框略向内收以便显示，实际覆盖范围以图像边缘为准。\n'
                    +color_description(kind)+'\n'
                    f'基准尺寸：{base:g} m。有效评估档位：'+'、'.join(f'{s:g} m' for s in valid)+'，从小到大。'
-                   '新增环带位于本档框和上一档框之间，档位结论依据本档整窗。\n'
-                   f'继承的地面类型：{payload["area_type"]}。')
+                   '新增环带位于本档框和上一档框之间，档位结论依据本档整窗。')
     return {'block_id': payload['block_id'], 'review_type': kind, 'image_description': description}
 
 
@@ -238,10 +255,12 @@ def judge_tier(tier: dict, kind: str, payload: dict, system: dict, size: float) 
     ring_missing = payload['ring_nodata_pct']
     tier_key = f'{size:g}'
     empty_ring = tier_key in ring_missing and ring_missing[tier_key] in (None, 100)
-    derived = derive_tier(tier, kind, payload['area_type'], system['core_rules'],
+    derived = derive_tier(tier, kind, system['core_rules'],
                           evidence_problem='ring_no_data' if empty_ring else None)
     check, data = tier[check_name(kind)], tier['data_check']
-    return {'size_m': size, 'source': 'vlm', 'decision_trace': derived['decision_trace'], 'degraded': derived['degraded'], 'degradation_type': derived['degradation_type'],
+    bbox = (payload.get('windows') or {}).get(f'{size:g}')
+    return {'size_m': size, 'source': 'vlm', **({'bbox': bbox} if bbox else {}),
+            'decision_trace': derived['decision_trace'], 'degraded': derived['degraded'], 'degradation_type': derived['degradation_type'],
             'reason_code': derived['reason_code'], 'confirmed_reasons': derived['matched_reasons'],
             'candidate_reasons': derived['candidate_reasons'], 'consistency_failures': derived['consistency_failures'],
             'new_ring': tier['new_ring'], 'evidence': tier['evidence'], 'window_evidence': check['evidence'],
@@ -323,7 +342,8 @@ def render_overview(manifest: dict, config: GlobalPreprocessConfig, results: lis
         if result['skip_reason'] == 'node6_not_confirmed':
             continue
         size = result['max_size_m'] or config.block_size_m
-        box = [v*scale for v in vi.review_window(block, size, resolution)]
+        tier = next((t for t in result.get('tiers', []) if t.get('size_m') == size), {})
+        box = [v*scale for v in (tier.get('bbox') or vi.review_window(block, size, resolution))]
         expanded = (result['max_size_m'] or 0) > config.block_size_m
         draw.rectangle(box, outline=(255, 220, 0) if result['stop_reason'] == 'base_incomplete' else colors[result['review_type']],
                        width=2*width if expanded else width)

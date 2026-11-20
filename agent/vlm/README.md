@@ -11,7 +11,7 @@
 | `block_review/semantic/`、`block_review/height/` | Node 6 退化块复核的两套独立 prompt 系统（prompt/skill/rule/schema），由 `agent/map_preprocess/nodes/vlm_review.py` 调用 |
 | `scene_type/` | Node 1b 整图道路结构（结构化/非结构化）判断的 prompt 系统（prompt/skill/schema），程序 `decide_scene` 映射到 MaGRoad 权重，由 `agent/map_preprocess/nodes/scene_type.py` 调用 |
 | `block_expansion/` | Node 7 退化区域尺寸扩展的 prompt 系统：按支路的 prompt/skill，共用的多尺寸 rule/schema；核心判据和字段复用 `block_review`，多尺寸 Rule 另提供当前支路的环带与整窗判据，由 `agent/map_preprocess/nodes/vlm_expansion.py` 调用 |
-| `localization_recommendation/` | Node 9 辅助定位方式推荐的 prompt 系统（prompt/skill/rule/schema），由 `agent/map_preprocess/nodes/localization_recommendation.py` 调用 |
+| `localization_recommendation/` | Node 9 从俯视 RGB 推测车端几何约束并推荐辅助定位方式的 prompt 系统（prompt/skill/rule/schema），由 `agent/map_preprocess/nodes/localization_recommendation.py` 调用 |
 | `parallel_vlm.py`、`loc_type_sys/` | 后续定位评估接口，配置未补齐，当前预处理不调用 |
 | `.env.example` | 环境变量示例，不自动加载 |
 
@@ -61,9 +61,9 @@ CUDA_HOME=/usr/local/cuda-12.4 TORCH_CUDA_ARCH_LIST=8.6 MAX_JOBS=16 \
 
 迁移已通过离线回归（请求解析、thinking 分段、启动命令）以及用真实 tokenizer 的 CPU 检查（所有业务 Schema 可编译为 llguidance 语法、多图模板占位、`</think>` 单 token）；这不等价于加载完整模型进行真实推理。
 
-Node 9 schema v2 要求结构化记录两项 P0 适用性、沿路开阔和遮挡或反射线索。程序根据这些字段校验 GPS 的 P1 条件和 P0 暂定项的复查标记。推荐理由须对应本区域已记录的图像证据。
+Node 9 schema v3 分别记录 LIO 和轮速适用性，以及 GPS 的天空开阔程度和遮挡或反射线索。推荐按 LIO、轮速、GPS 的顺序校验。LIO 根据沿路的稳定几何选型，树荫和遮挡不参与评分。推荐理由须对应本区域已记录的图像证据。
 
-`block_review` 的语义 schema 为 v10，高程为 v11。两条支路都返回图像证据、逐字段置信度及 `verdict`。程序校验数据可用性和证据引用后采用 `verdict.result` 作为退化结论，通行性独立处理。历史上没有 `verdict` 的结果仍可按旧规则解释。
+`block_review` 的语义 schema 为 v11，高程为 v12。两条支路都返回图像证据、逐字段置信度及 `verdict`。程序校验数据可用性和证据引用后采用 `verdict.result` 作为退化结论。历史上没有 `verdict` 的结果仍可按旧规则解释。
 语义关注类别占比、道路边界、类别侵入和直道沿路语义重复；高程关注高出结构分布及直道两侧持续相似的高度分布。
 两套新增 `road_geometry`、`longitudinal_structure` 中文枚举，派生 `degradation_type` 区分退化、纵向退化、不退化与未知；不判断雷达实际可见性或定位切换。
 未知数据不归为正常；建筑占比不再自动豁免。详见 [Node 6 说明](../map_preprocess/README.md#node-6退化块-vlm-复核vlm_review_blocks)。
@@ -72,6 +72,12 @@ Node 9 schema v2 要求结构化记录两项 P0 适用性、沿路开阔和遮�
 
 Node 6 输入先统一裁去地图外区域，允许长方形；范围、横纵比例尺和中心位置随实际图像发送。地图内部原始无数据仍保留，具体字段见 Node 6 输入说明。
 
-正式流程的 75 m 基准框来自 Node 4 沿道路拓扑按 71.25 m 弧长步长布出的框。Node 5 按阈值筛选候选块，Node 6 独立复核候选块的命中支路。
+正式流程的 75 m 基准框来自 Node 4 沿道路拓扑按 48.75 m 弧长步长布出的框。Node 5 按阈值筛选候选块，Node 6 独立复核候选块的对应支路。
 
 Node 6 的 `<type>_input.json` 仅包含标识及图像说明（semantic、height 各三图），几何与统计留在 `<type>_metadata.json`。请求正文只给实际覆盖宽高及颜色解释，完整 Schema 通过结构化输出参数传入。
+
+Node 6 高程复核接收 Node 5 阈值命中的块及道路高程基准无效但仍有有效 DSM 的块。两种情况使用相同的图像、着色参考和规则。道路基准检查及初筛结果保存在 Node 5 产物中，模型根据输入图独立判断。
+
+道路中心相对有效路面基准出现向上阶跃时，Node 6 高程请求附上遮挡、车辆可进入的隧道或下穿入口、建筑占路的核查提示。
+
+`--analysis semantic|height|both` 控制 Node 5 的初筛分支。Node 6 按候选支路分别构造输入，Node 7 只扩展已确认退化的支路。

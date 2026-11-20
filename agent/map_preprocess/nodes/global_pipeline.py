@@ -174,10 +174,29 @@ def _road_support_fn(state: PreprocessState, config: GlobalPreprocessConfig) -> 
                                                      state['resolution_m_per_px'])
 
 
-def _topology_from_masks(state: PreprocessState, config: GlobalPreprocessConfig, semantic_segmenter) -> tuple:
-    """掩码拓扑：MaGRoad 概率上采样到原图后和语义分割融合，生成路网；不使用 MaGRoad 的稀疏图。"""
+def _padded_border_mask(rgb: np.ndarray, valid_mask: np.ndarray, margin_px: int = 0) -> np.ndarray:
+    """识别与图像外边缘连通的纯白/纯黑填充边及无效区，并向内扩展 margin_px 以消除拼接缝假道路。"""
     import cv2
-    from .semantic_roads import whole_image_semantic
+    from scipy.ndimage import binary_propagation
+    h, w = valid_mask.shape
+    seed = np.zeros((h, w), dtype=bool)
+    seed[0, :] = seed[-1, :] = seed[:, 0] = seed[:, -1] = True
+    near_white = (rgb[..., 0] >= 252) & (rgb[..., 1] >= 252) & (rgb[..., 2] >= 252)
+    near_black = (rgb[..., 0] <= 3) & (rgb[..., 1] <= 3) & (rgb[..., 2] <= 3)
+    padded = ~valid_mask
+    if (seed & near_white).any():
+        padded |= binary_propagation(seed & near_white, mask=near_white)
+    if (seed & near_black).any():
+        padded |= binary_propagation(seed & near_black, mask=near_black)
+    if margin_px > 0 and padded.any():
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*margin_px+1, 2*margin_px+1))
+        padded = cv2.dilate(padded.astype(np.uint8), kernel) > 0
+    return padded
+
+
+def _topology_from_masks(state: PreprocessState, config: GlobalPreprocessConfig, semantic_segmenter) -> tuple:
+    """掩码拓扑：MaGRoad 概率上采样到原图后直接生成路网；不使用 MaGRoad 的稀疏图。"""
+    import cv2
     from ..utils import road_topo
     from . import road_topo_cache as topo_cache
     logger = logging.getLogger(f"map_preprocess.{state['task_id']}")
@@ -191,29 +210,31 @@ def _topology_from_masks(state: PreprocessState, config: GlobalPreprocessConfig,
     metadata = state['image']
     geotiff = state['image_path'] if 'crs' in metadata and 'transform' in metadata else None
     out_dir, vis_dir = layout.state_dir(state['output_dir'])/'road_topo', layout.figure(state['output_dir'], 'road_topo_stages')
-    # 拓扑只依赖 MaGRoad 概率、整图语义和 road_topo 参数/代码：同一输入再次运行直接读缓存（见 road_topo_cache.py）
-    key = topo_cache.cache_key(state, config, semantic_segmenter, geotiff is not None)
+    # 拓扑只依赖 MaGRoad 概率和 road_topo 参数/代码：同一输入再次运行直接读缓存（见 road_topo_cache.py）
+    key = topo_cache.cache_key(state, config, geotiff is not None)
     cached = topo_cache.load(config, key, out_dir, vis_dir, logger) if key else None
-    semantic_hit = None
     if cached is not None:
         source, records, removed = cached
     else:
-        labels, _, semantic_info = whole_image_semantic(state, config, semantic_segmenter, logger)
-        semantic_hit = semantic_info['cache_hit']
-        if labels.shape != size[::-1]:
-            labels = cv2.resize(labels, size, interpolation=cv2.INTER_NEAREST)
+        # 中性占位仅传递原图有效范围，排除 GeoTIFF 无效区及与外边缘连通的纯白/纯黑填充边。
+        labels = np.full(size[::-1], 3, dtype=np.uint8)
+        with open_image(state['image_path'], config.pillow_max_image_pixels) as image:
+            bbox = [0, 0, *size]
+            margin_px = max(2, round(settings.preprocess.close_m/resolution))
+            padded = _padded_border_mask(image.read(bbox), image.valid_mask(bbox), margin_px=margin_px)
+            labels[padded] = settings.classes.nodata_id
         probability = np.load(path, allow_pickle=False).astype(np.float32)
         if probability.shape != size[::-1]:
             probability = cv2.resize(probability, size, interpolation=cv2.INTER_LINEAR)
         source, records, removed = road_topo.run_arrays(probability, labels, resolution, out_dir, settings,
-            geotiff=geotiff, vis_out=vis_dir, log=logger.info)
+            geotiff=geotiff, vis_out=vis_dir, log=logger.info, road_only=True)
         del labels, probability
         if key:
             topo_cache.save(config, key, state['image_path'], (source, records, removed), out_dir, vis_dir, logger)
     graph = road_topo.to_pipeline_graph(source, resolution, size)
     stats = {'road_topo': {'steps': [{k: v for k, v in r.items() if k != 'detail'} for r in records],
                            'cache_hit': cached is not None, 'cache_key': key[:24] if key else None,
-                           'semantic_cache_hit': semantic_hit, 'after': roads.graph_stats(graph)}}
+                           'source': 'magroad_only', 'after': roads.graph_stats(graph)}}
     if config.road_max_shared_gap_m > 0:
         stats['crowded_junctions'] = {'splits': road_refine.split_crowded_junctions(graph, config.road_max_shared_gap_m, resolution, config.road_max_node_degree),
                                       'after': roads.graph_stats(graph)}
@@ -454,6 +475,9 @@ def build_blocks_and_groups(state: PreprocessState, *, config: GlobalPreprocessC
     # 布块对照：去重前沿每条边独立布块（第一次找）与最终保留块。
     method = dedup_stats['method'] if dedup_stats else 'none'
     total_m = sum(e['length_m'] for e in edges)
+    reference_mask = layout.state_dir(state['output_dir'])/'road_topo'/layout.CLEANED_ROAD_REFERENCE_MASK
+    if reference_mask.is_file():
+        manifest['files']['cleaned_road_reference_mask'] = relative_path(reference_mask)
     manifest['files']['road_topology'] = relative_path(layout.figure(state['output_dir'], 'road_topology'))
     render_road_topology(state['image'], manifest['files']['road_topology'], config, edges=edges, nodes=nodes,
                          title=f'road topology: {len(edges)} edges, {len(nodes)} nodes, {total_m:.0f} m')

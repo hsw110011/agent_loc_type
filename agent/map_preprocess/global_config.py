@@ -35,7 +35,21 @@ NODE_ORDER = ('load_image_and_resolution', 'classify_scene_type', 'extract_road_
 # 24：正式配置启用 Node 6 的 medium 思考档。
 # 25：本地 VLM 默认五路并行，并行时默认关闭草稿模型。
 # 26：正式流程的所有 VLM 节点启用 medium 思考。
-PIPELINE_VERSION = 26
+# 27：Node 5 用去除遮挡补桥的清洗道路掩码补选路面高程基准。
+# 28：Node 9 从俯视 RGB 推测车端几何约束，轮速选型按区域过渡评估。
+# 29：纯 MaGRoad 拓扑，复核只判断退化，DSM 基准可独立于语义。
+# 30：校验道路高程基准，无效基准直接送高程复核。
+# 31：路面基准扩至 20 m，路中心向上阶跃送高程复核并附核查提示。
+# 32：DSM 最近邻对齐，路口按道路覆盖去重，阶段重跑保护产物。
+# 33：支持显式选择语义、高程或双分支分析。
+# 34：Node 9 区分树荫、天空遮挡与车端几何可见性，独立评估路带接续。
+# 35：Node 9 优先考虑适用的 LIO，按沿路几何选型，并校验推荐优先级。
+# 36：沿路布块重叠 25%，冗余剪除至少 75% 面积重叠，Node 9 简化输出。
+# 37：Node 5 拼图标注实际初筛阈值、命中项和额外高程复核原因。
+# 38：沿路名义重叠改为 35%，语义初筛道路占比上限改为 15%。
+# 版本 40：Node 3 掩码拓扑排除与图像外边缘连通的纯白/纯黑填充边及拼接缝
+PIPELINE_VERSION = 40
+ANALYSIS_MODES = ("auto", "semantic", "height", "both")
 # Node 8 可融合的退化类别；non_degraded、unknown 不属于已确认的退化，不能配置进融合
 FUSABLE_DEGRADATION_TYPES = ('degradation', 'longitudinal_degradation')
 
@@ -143,7 +157,7 @@ class GlobalPreprocessConfig(PreprocessConfig):
     dedup_prune_max_loss_m: float = 5.0
     road_sample_spacing_m: float = 1.0
     min_road_coverage: float = .995
-    block_overlap_ratio: float = .05
+    block_overlap_ratio: float = .35
     blocks_per_group: int = 3
     group_overlap_blocks: int = 1
     long_edge_strategy: str = 'split_continuous'
@@ -152,13 +166,17 @@ class GlobalPreprocessConfig(PreprocessConfig):
     debug_block_ids: tuple[str, ...] = ()
     # Node 5：每块（图内部分）的语义（RGB）与高程（DSM，可选）。没有 DSM 时只判语义退化。
     block_features_enabled: bool = False
+    analysis: str = "auto"
     perception_config: str = 'agent/perception_tools.yaml'
     # 仅为兼容旧配置保留：Node 5 已改为裁剪整图语义，不再逐块缓存
     feature_cache_enabled: bool = True
     feature_cache_dir: str = 'output/map_preprocess/cache/block_features'
     feature_min_class_confidence: float = .5
-    # 兼容旧配置；Node 5 路面基准已改用 5 m / 10 m 方窗。
+    # 兼容旧配置；Node 5 路面基准已改用 5 m / 10 m / 20 m 方窗。
     feature_center_radius_m: float = 2.0
+    feature_road_ref_min_samples: int = 3
+    feature_road_ref_min_valid_pct: float = 50.
+    feature_road_ref_max_iqr_m: float = 2.
     # 低于 0 点超过该值（米）的像元不算有效像元；[-该值, 0) 视为 0 m（路面 DSM 噪声）。设 0 为严格以 0 为界。
     feature_below_base_tolerance_m: float = 0.3
     # 高度连续性：水平 feature_step_run_m（米）内高差 >= feature_step_height_m（米）视为台阶（阶跃）。
@@ -176,9 +194,10 @@ class GlobalPreprocessConfig(PreprocessConfig):
     # 或阶跃低于路面的像元 step_below_pct > feature_height_below_max_pct（如路堤/高架，四周隔着台阶比路低）。>2m 占比大不算退化。
     feature_height_flat_min_pct: float = 90.
     feature_height_below_max_pct: float = 70.
-    # 语义退化：道路占比 < feature_semantic_max_road_pct 且 植被占比 > feature_semantic_min_plant_pct（%）。
-    feature_semantic_max_road_pct: float = 10.
+    # 语义退化：道路占比 < feature_semantic_max_road_pct 且（植被占比 > feature_semantic_min_plant_pct 或 植被+建筑 > feature_semantic_min_clutter_pct）（%）。
+    feature_semantic_max_road_pct: float = 15.
     feature_semantic_min_plant_pct: float = 65.
+    feature_semantic_min_clutter_pct: float = 85.
     # 每块输出 rgb/semantic/height/height_bands PNG 到 visualization/07_per_block_images/；null 为原分辨率。
     feature_vis_enabled: bool = True
     feature_vis_max_side: int | None = 1000
@@ -201,6 +220,7 @@ class GlobalPreprocessConfig(PreprocessConfig):
     vlm_review_reasoning_effort: str | None = None
     vlm_review_max_tokens: int = 8192
     vlm_review_workers: int = 5
+    vlm_review_max_retries: int = 1
     # 只渲染输入图与 prompt，不调用 VLM、不修改 manifest
     vlm_review_dry_run: bool = False
     # Node 7：退化区域尺寸扩展（本地 Qwen）。基准为 block_size_m，同心逐档扩大，semantic/height 独立记录；需要 Node 6。
@@ -410,6 +430,8 @@ class GlobalPreprocessConfig(PreprocessConfig):
             raise ValueError('vlm_expansion_sizes_m 必须都大于基准尺寸 block_size_m')
 
     def _validate_features(self) -> None:
+        if self.analysis not in ANALYSIS_MODES:
+            raise ValueError(f"analysis 必须是 {ANALYSIS_MODES} 之一")
         for name in ('vlm_review_enabled', 'vlm_review_dry_run', 'vlm_expansion_enabled', 'vlm_expansion_dry_run',
                      'degradation_fusion_enabled', 'degradation_fusion_cross_type'):
             if type(getattr(self, name)) is not bool:
@@ -421,7 +443,7 @@ class GlobalPreprocessConfig(PreprocessConfig):
             raise ValueError(f'degradation_fusion_types 必须为 {FUSABLE_DEGRADATION_TYPES} 中的非空子集，当前为 {types!r}')
         self._validate_localization()
         for name, low in (('vlm_review_image_px', 128), ('vlm_review_grid_cells', 2), ('vlm_review_max_tokens', 256),
-                          ('vlm_review_workers', 1)):
+                          ('vlm_review_workers', 1), ('vlm_review_max_retries', 0)):
             if type(getattr(self, name)) is not int or getattr(self, name) < low:
                 raise ValueError(f'{name} 必须为 >= {low} 的整数')
         if not 0 < self.vlm_review_semantic_min_building_pct <= 100:
@@ -456,12 +478,18 @@ class GlobalPreprocessConfig(PreprocessConfig):
             if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
                 raise ValueError(f'{name} 必须为路径')
         for name in ('feature_height_flat_min_pct', 'feature_height_below_max_pct', 'feature_semantic_max_road_pct',
-                     'feature_semantic_min_plant_pct'):
+                     'feature_semantic_min_plant_pct', 'feature_semantic_min_clutter_pct'):
             self._number(name, getattr(self, name))
             if not 0 < getattr(self, name) < 100:
                 raise ValueError(f'{name} 必须在 (0, 100)')
         if type(self.feature_dsm_ground_cells) is not int or not 2 <= self.feature_dsm_ground_cells <= 64:
             raise ValueError('feature_dsm_ground_cells 必须为 2~64 的整数')
+        if type(self.feature_road_ref_min_samples) is not int or self.feature_road_ref_min_samples < 1:
+            raise ValueError('feature_road_ref_min_samples 必须为正整数')
+        self._number('feature_road_ref_min_valid_pct', self.feature_road_ref_min_valid_pct, positive=True)
+        if self.feature_road_ref_min_valid_pct > 100:
+            raise ValueError('feature_road_ref_min_valid_pct 不能超过 100')
+        self._number('feature_road_ref_max_iqr_m', self.feature_road_ref_max_iqr_m, positive=True)
         self._number('feature_below_base_tolerance_m', self.feature_below_base_tolerance_m)
         if self.feature_below_base_tolerance_m < 0:
             raise ValueError('feature_below_base_tolerance_m 不能为负')

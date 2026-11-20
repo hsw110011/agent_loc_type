@@ -13,8 +13,8 @@ from pathlib import Path
 
 from agent.vlm.block_review import _check_unconditional
 
-P0_METHODS = ('lidar_inertial_slam', 'wheel_imu_odometry')
-METHODS = (*P0_METHODS, 'gps')
+ODOMETRY_METHODS = ('lidar_inertial_slam', 'wheel_imu_odometry')
+METHODS = (*ODOMETRY_METHODS, 'gps')
 STATUSES = ('provisional', 'requires_validation')
 ROOT = Path(__file__).parent
 PROMPT_NAME = 'node9_localization_recommendation_prompt.md'
@@ -40,7 +40,7 @@ def load_recommendation_system(root: str | Path | None = None) -> dict:
     program = rules['program']
     if set(rules['methods']) != set(METHODS) or set(program['mandatory_limitations']) != set(METHODS):
         raise ValueError(f'{base}/rule.yaml 的定位方式与程序不一致')
-    if {key: value.get('priority') for key, value in rules['methods'].items()} != {**dict.fromkeys(P0_METHODS, 'P0'), 'gps': 'P1'}:
+    if {key: value.get('priority') for key, value in rules['methods'].items()} != {method: f'P{rank}' for rank, method in enumerate(METHODS)}:
         raise ValueError(f'{base}/rule.yaml 的定位优先级与程序不一致')
     if set(rules['status']) != set(STATUSES):
         raise ValueError(f'{base}/rule.yaml 的 status 与程序不一致')
@@ -93,23 +93,27 @@ def check_recommendation(output: dict, schema: dict, rules: dict) -> None:
     if numbers:
         raise InvalidRecommendation(f'只做定性比较，不得给出百分比、评分等数值：{"、".join(numbers)}')
     method, assessment = output['recommended_method'], output['assessment']
-    p0 = {key: assessment[key] for key in P0_METHODS}
+    if assessment['structure_density'] == 'dense':
+        if assessment['lidar_inertial_slam'] == 'unsuitable':
+            raise InvalidRecommendation('结构密集区域（structure_density=dense）具备三维结构线索，lidar_inertial_slam 不应判为 unsuitable')
+        if method != 'lidar_inertial_slam':
+            raise InvalidRecommendation('结构密集区域（structure_density=dense）可使用 lidar_inertial_slam 过渡，不得改选 wheel_imu_odometry 或 gps')
+    suitable = next((key for key in ODOMETRY_METHODS if assessment[key] == 'suitable'), None)
     if method == 'gps':
-        if (any(value != 'unsuitable' for value in p0.values()) or assessment['sky_view'] != 'open'
+        if (any(assessment[key] != 'unsuitable' for key in ODOMETRY_METHODS) or assessment['sky_view'] != 'open'
                 or assessment['obstruction_or_reflection'] != 'absent'):
-            raise InvalidRecommendation('GPS 要求两项 P0 均为 unsuitable、sky_view=open 且 obstruction_or_reflection=absent')
-    elif p0[method] != 'suitable':
-        if 'suitable' in p0.values():
-            raise InvalidRecommendation('已有 P0 评为 suitable，应选择适用的一项')
-        if output['recommendation_status'] != 'requires_validation' or not output['review_required']:
-            raise InvalidRecommendation('暂定的 P0 需要 recommendation_status=requires_validation 和 review_required=true')
+            raise InvalidRecommendation('GPS 要求 LIO 和轮速均为 unsuitable、sky_view=open 且 obstruction_or_reflection=absent')
+    elif suitable and method != suitable:
+        raise InvalidRecommendation(f'优先推荐适用的方法 {suitable}')
+    elif not suitable and output['recommendation_status'] != 'requires_validation':
+        raise InvalidRecommendation('暂定的里程方式需要 recommendation_status=requires_validation')
 
 
 def apply_program_rules(output: dict, rules: dict) -> dict:
     """返回程序确定的 recommendation_status 与 limitations：只收紧状态、只增加限制，不改模型选择的方式。"""
     program = rules['program']
     method = output['recommended_method']
-    forced = method in program['always_requires_validation'] or output['review_required']
+    forced = method in program['always_requires_validation']
     status = 'requires_validation' if forced else output['recommendation_status']
     return {'recommendation_status': status,
             'limitations': list(dict.fromkeys([*output['limitations'], *program['mandatory_limitations'][method]]))}

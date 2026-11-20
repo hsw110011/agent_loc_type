@@ -1,9 +1,9 @@
-"""Node 3 掩码拓扑缓存：缓存 road_topo.run_arrays 的结果（R/S 融合、骨架化、遮挡补全、面状区域等），命中时不再重算。
+"""Node 3 掩码拓扑缓存：缓存 road_topo.run_arrays 的结果（MaGRoad 掩码、骨架化、面状区域等），命中时不再重算。
 
 键 = MaGRoad 缓存键（含输入哈希、权重、分辨率）+ 整图语义缓存键（含模型身份）+ 图像尺寸/分辨率
      + 配置里 road_topo 一节 + road_topo.py 源码哈希 + CACHE_VERSION。
 改 Node 4 及之后的参数不会让缓存失效；改 road_topo 参数或代码会自动失效。
-_topology_from_masks 中 run_arrays 之前的输入准备（概率/语义缩放）若有改动，要递增 CACHE_VERSION。
+_topology_from_masks 中 run_arrays 之前的输入准备（概率缩放及原图有效范围）若有改动，要递增 CACHE_VERSION。
 
 缓存目录 <cache_dir>/road_topo/<时间>_<图名>_<键前 12 位>/：
   result.pkl（(路网, 每步统计, 删除的分支点列)）、meta.json、data/（state/road_topo 的数据）、figures/（01b_road_topo 图）。
@@ -28,7 +28,7 @@ from ..io import fsync_path, read_json, resolve_path, write_json
 from .. import output_layout as layout
 from ..state import PreprocessState
 
-CACHE_VERSION = 1
+CACHE_VERSION = 3
 ROAD_TOPO_SOURCE = Path(__file__).resolve().parents[1]/'utils'/'road_topo.py'
 
 
@@ -38,16 +38,12 @@ def topo_settings(config: GlobalPreprocessConfig) -> Any:
     return values.get('road_topo', values)
 
 
-def cache_key(state: PreprocessState, config: GlobalPreprocessConfig, semantic_segmenter: Any, geotiff: bool) -> str | None:
-    """不可缓存（关闭缓存、没有 MaGRoad 缓存、注入的语义模型没有身份）时返回 None。"""
-    from .semantic_roads import semantic_cache_key
+def cache_key(state: PreprocessState, config: GlobalPreprocessConfig, geotiff: bool) -> str | None:
+    """不可缓存（关闭缓存、没有 MaGRoad 缓存）时返回 None。"""
     road = state.get('road_graph_cache') or {}
     if not config.cache_enabled or not road.get('key') or road.get('enabled') is False:
         return None
-    semantic, fingerprint, *_ = semantic_cache_key(state, config, semantic_segmenter)
-    if fingerprint is None:
-        return None
-    payload = {'version': CACHE_VERSION, 'road_graph': road['key'], 'semantic': semantic,
+    payload = {'version': CACHE_VERSION, 'road_graph': road['key'],
                'size': [state['image']['width'], state['image']['height']], 'resolution': state['resolution_m_per_px'],
                'geotiff': geotiff, 'settings': topo_settings(config),
                'code': hashlib.sha256(ROAD_TOPO_SOURCE.read_bytes()).hexdigest()}

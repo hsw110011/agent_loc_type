@@ -2,7 +2,7 @@
 
 prompt.md / skill.md 按支路各一份，rule.yaml / schema.json 两支路共用，规则按支路补充扩展观察与停止逻辑。
 退化判据不复制：请求附带 Node 6 同支路 Rule 的核心部分，每档字段沿用其 data_check 与结构字段 schema，
-结论沿用同一个 derive_review 适配，两条支路都取模型 verdict。地面类型继承 Node 6 的有效值。最大尺寸由 walk_tiers 按档计算，模型不选择。
+结论沿用同一个 derive_review 适配，两条支路都取模型 verdict。最大尺寸由 walk_tiers 按档计算，模型不选择。
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pathlib import Path
 from agent.vlm.block_review import REVIEW_TYPES, derive_review, load_review_system
 
 ROOT = Path(__file__).parent
-# 发送给模型的 Node 6 Rule 部分；drivable 不在其中，地面类型继承而不重新判断。
+# 发送给模型的 Node 6 Rule 部分。
 CORE_RULE_KEYS = ('confidence', 'uncertainty', 'data', 'degradation', 'consistency_checks', 'preprocess')
 STATE_LABELS = {True: '退化', False: '不退化', None: '未知'}
 NOT_EVALUATED = '未评估'
@@ -81,12 +81,11 @@ def bind_expansion(system: dict, block_id: str, review_type: str, sizes: list[fl
     return schema
 
 
-def derive_tier(tier: dict, review_type: str, area_type: str, core_rules: dict, *,
+def derive_tier(tier: dict, review_type: str, core_rules: dict, *,
                 evidence_problem: str | None = None) -> dict:
-    """单档字段 → Node 6 同一套推导；地面类型继承基准，不由模型判断。"""
+    """单档字段 → Node 6 同一套推导；"""
     name = check_name(review_type)
-    output = {'review_type': review_type, 'data_check': tier['data_check'], name: tier[name],
-              'drivable_check': {'area_type': area_type, 'area_type_confidence': '高'}}
+    output = {'review_type': review_type, 'data_check': tier['data_check'], name: tier[name]}
     return derive_review(output, core_rules, evidence_problem=evidence_problem, ring_evidence=tier['new_ring'])
 
 

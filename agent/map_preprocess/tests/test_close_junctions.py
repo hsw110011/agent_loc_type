@@ -103,9 +103,9 @@ class PruneRedundantTests(unittest.TestCase):
         counts = np.zeros(100, np.int64)
         for block in blocks:
             counts[block.covered] += 1
-        kept, removed = prune_redundant(blocks, counts, config)
+        kept, removed = prune_redundant(blocks, counts, config, config.block_size_m)
         self.assertEqual(removed, 1)
         self.assertEqual([b.arc_m for b in kept], [0., 1.])
         self.assertTrue((counts > 0).all())
         # 独占覆盖 >= 5 m 的块不删
-        self.assertEqual(prune_redundant(kept, counts, config)[1], 0)
+        self.assertEqual(prune_redundant(kept, counts, config, config.block_size_m)[1], 0)

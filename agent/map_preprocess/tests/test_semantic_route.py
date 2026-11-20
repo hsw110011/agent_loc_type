@@ -163,9 +163,9 @@ class SemanticRouteTests(unittest.TestCase):
         middle = np.asarray([p for p in edge['polyline_xy'] if 85. <= p[0] <= 115.])
         self.assertGreater(float(middle[:, 1].mean()), 80.)  # 概率断开处向语义路面靠拢
 
-    def test_both_pipeline_configs_enable_it(self):
+    def test_default_pipeline_disables_semantic_routing(self):
         directory = Path(__file__).resolve().parents[1]
-        self.assertIs(yaml.safe_load((directory/'pipeline.yaml').read_text(encoding='utf-8'))['road_semantic_route_enabled'], True)
+        self.assertIs(yaml.safe_load((directory/'pipeline.yaml').read_text(encoding='utf-8'))['road_semantic_route_enabled'], False)
 
 
 if __name__ == '__main__':

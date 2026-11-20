@@ -70,7 +70,7 @@ def shared_vlm_client(settings: GlobalPreprocessConfig, vlm_client=None, semanti
 
     服务按需启动：Node 1b 用完即关闭（给 MaGRoad 让出显存），Node 6 首次请求时启动，之后 Node 7、Node 9 复用同一服务，
     流程结束再关闭，不再每个节点各启动一次。Node 7 需要整图语义：只有启用缓存、使用流程自带语义模型时才共用
-    （此时语义一定命中 Node 3 写下的缓存，不会在 VLM 占满显存时再加载分割模型）；否则各节点仍自行启动、关闭。
+    （此时语义一定命中 Node 5 写下的缓存，不会在 VLM 占满显存时再加载分割模型）；否则各节点仍自行启动、关闭。
     """
     if vlm_client is not None:
         return vlm_client, False
@@ -158,7 +158,9 @@ def run_pipeline(image_path: str, config: GlobalPreprocessConfig | None = None,
     source = resolve_path(image_path)
     if not source.is_file():
         raise FileNotFoundError(source)
-    if dsm_path is None and source.stem.endswith('_dom') and source.suffix.lower() in ('.tif', '.tiff'):
+    if settings.analysis == 'semantic':
+        dsm_path = None
+    if settings.analysis != 'semantic' and dsm_path is None and source.stem.endswith('_dom') and source.suffix.lower() in ('.tif', '.tiff'):
         for suffix in dict.fromkeys((source.suffix, '.tif', '.tiff')):
             paired = source.with_name(f'{source.stem.removesuffix("_dom")}_dsm{suffix}')
             if paired.is_file():
@@ -166,6 +168,8 @@ def run_pipeline(image_path: str, config: GlobalPreprocessConfig | None = None,
                 break
     if dsm_path is not None and not resolve_path(dsm_path).is_file():
         raise FileNotFoundError(resolve_path(dsm_path))
+    if settings.analysis in ("height", "both") and dsm_path is None:
+        raise ValueError(f"--analysis {settings.analysis} 需要 DSM，请提供 --dsm 或同名配对文件")
     # 任务 ID = 本地时间（到秒）+ 6 位随机后缀，如 20261104_051230_3eb8a1：按名字排序即运行先后，
     # 同一秒内重复运行也不会冲突。
     task_id = f"{datetime.now():%Y%m%d_%H%M%S}_{uuid4().hex[:6]}"

@@ -16,7 +16,7 @@ from .global_blocks import make_block
 
 # 仅用于浮点边界判断，不是物理缓冲区或可调道路阈值。
 _EPS = 1e-9
-_MIN_DUPLICATE_AREA_RATIO = .5
+_MIN_DUPLICATE_AREA_RATIO = .75
 
 
 def arc_positions(length_m: float, spacing_m: float) -> np.ndarray:
@@ -176,9 +176,8 @@ def _prune_overlapping_blocks(blocks: list[dict], edges: list[dict]) -> list[dic
     removed = set()
     for i in order:
         bbox = boxes[i]
-        overlap_threshold = bbox.area*_MIN_DUPLICATE_AREA_RATIO
         neighbors = [j for j in tree.query(bbox) if j != i and j not in removed
-                     and bbox.intersection(boxes[j]).area >= overlap_threshold]
+                     and bbox.intersection(boxes[j]).area >= bbox.area*_MIN_DUPLICATE_AREA_RATIO]
         if not neighbors:
             continue
         intervals = defaultdict(list)
@@ -192,27 +191,31 @@ def _prune_overlapping_blocks(blocks: list[dict], edges: list[dict]) -> list[dic
     return [block for i, block in enumerate(blocks) if i not in removed]
 
 
-def prune_redundant(selected: list[Candidate], cover_counts: np.ndarray, config: GlobalPreprocessConfig) -> tuple[list[Candidate], int]:
-    """冗余剪除：反复删去“独占覆盖”（只有它覆盖的道路采样点）最少的块，条件是独占长度 < dedup_prune_max_loss_m
-    且删后整体覆盖率仍 >= min_road_coverage。沿路依次放块时，前面的块常被后来的相邻块完全盖住。"""
-    if not config.dedup_prune_enabled or not len(cover_counts):
+def prune_redundant(selected: list[Candidate], cover_counts: np.ndarray, config: GlobalPreprocessConfig,
+                    side: float) -> tuple[list[Candidate], int]:
+    """按独占采样点剪除冗余框，同时要求保留邻框至少重叠 75% 面积。"""
+    if not config.dedup_prune_enabled or not selected:
         return selected, 0
-    kept, removed = list(selected), 0
+    boxes = [box(c.x-side/2, c.y-side/2, c.x+side/2, c.y+side/2) for c in selected]
+    tree = STRtree(boxes)
+    neighbors = [{j for j in tree.query(bbox) if j != i
+                  and bbox.intersection(boxes[j]).area >= bbox.area*_MIN_DUPLICATE_AREA_RATIO}
+                 for i, bbox in enumerate(boxes)]
+    kept = set(range(len(selected)))
     total = len(cover_counts)
     covered = int(np.count_nonzero(cover_counts))
-    while kept:
-        unique = [int(np.count_nonzero(cover_counts[c.covered] == 1)) for c in kept]
-        order = sorted(range(len(kept)), key=lambda i: (unique[i], len(kept[i].covered), kept[i].edge_id, kept[i].arc_m))
-        index = order[0]
+    while eligible := [i for i in kept if neighbors[i] & kept]:
+        unique = {i: int(np.count_nonzero(cover_counts[selected[i].covered] == 1)) for i in eligible}
+        index = min(eligible, key=lambda i: (unique[i], len(selected[i].covered),
+                                            selected[i].edge_id, selected[i].arc_m, i))
         loss = unique[index]
-        if loss*config.road_sample_spacing_m >= config.dedup_prune_max_loss_m or \
-                (covered-loss) < config.min_road_coverage*total-_EPS:
+        if (loss*config.road_sample_spacing_m >= config.dedup_prune_max_loss_m
+                or covered-loss < config.min_road_coverage*total-_EPS):
             break
-        cover_counts[kept[index].covered] -= 1
+        cover_counts[selected[index].covered] -= 1
         covered -= loss
-        kept.pop(index)
-        removed += 1
-    return kept, removed
+        kept.remove(index)
+    return [selected[i] for i in sorted(kept)], len(selected)-len(kept)
 
 
 def cross_edge_dedup(edges: list[dict], original_blocks: list[dict], image: dict, tiles: list[dict],
@@ -256,7 +259,7 @@ def cross_edge_dedup(edges: list[dict], original_blocks: list[dict], image: dict
                                             index.query([x-side/2,y-side/2,x+side/2,y+side/2])))
         selected, cover_counts = _greedy_select(candidates, count, config)
         candidate_count = len(candidates)
-        selected, pruned = prune_redundant(selected, cover_counts, config)
+        selected, pruned = prune_redundant(selected, cover_counts, config, side)
         blocks = []
         for edge in ordered_edges:
             owned = sorted((c for c in selected if c.edge_id == edge['edge_id']), key=lambda c: (c.arc_m,c.x,c.y))

@@ -27,7 +27,7 @@ def early_exit(state: dict[str, Any]) -> dict | None:
     返回 {'after': 结束前最后一个节点, 'stage', 'reason'}；没有提前结束条件时为 None。
     """
     features, review = state.get('block_features') or {}, state.get('vlm_review') or {}
-    candidates = features.get('degraded_blocks', features.get('review_candidate_block_ids'))
+    candidates = features.get('review_candidate_block_ids', features.get('degraded_blocks'))
     if features.get('status') == 'completed' and not candidates:
         return {'after': 'compute_block_features', 'stage': 'node5', 'reason': 'no_candidates', 'label': 'Node 5 没有可送审的道路块'}
     if review.get('status') in DONE and not review.get('degraded_scene_count'):
@@ -87,13 +87,12 @@ def build_final_summary(state: dict[str, Any]) -> dict:
     else:
         conclusion = 'no_degradation'
 
-    candidates = features.get('degraded_blocks', features.get('review_candidate_block_ids'))
+    candidates = features.get('review_candidate_block_ids', features.get('degraded_blocks'))
     counts = {'blocks': features.get('block_count'), 'candidate_blocks': len(candidates or []),
               'reviewed_blocks': review.get('reviewed_blocks'), 'confirmed_degraded_blocks': confirmed,
               'rejected_blocks': len(review.get('rejected_block_ids') or []),
               'removed_undrivable_blocks': len(review.get('removed_block_ids') or []),
-              'degradation_regions': regions, 'recommended_regions': recommendation.get('recommended_count', 0),
-              'review_required_regions': recommendation.get('review_required_count', 0)}
+              'degradation_regions': regions, 'recommended_regions': recommendation.get('recommended_count', 0)}
     detail = '；'.join(f"{item['stage']} {item['label']} {item['count']}" for item in issues)
     if conclusion == 'degraded':
         methods = recommendation.get('method_counts') or {}

@@ -1,4 +1,4 @@
-"""块级总结拼图：每块一行，最右列展示占比和 Node 5 初筛结论。
+"""块级总结拼图：每块一行，最右列展示占比、Node 5 初筛标准和结论。
 
 Node 5 会自动为全部退化块输出到 visualization/06_degraded_block_sheets/；也可手动运行：
 python -m agent.map_preprocess.feature_contact_sheet --manifest .../state/manifest.json --degraded
@@ -8,6 +8,7 @@ python -m agent.map_preprocess.feature_contact_sheet --manifest ... --block-ids 
 from __future__ import annotations
 
 import argparse
+import operator
 from pathlib import Path
 import random
 import sys
@@ -44,10 +45,15 @@ def _font(size: int, bold: bool = False) -> ImageFont.ImageFont:
 
 
 def _settings(manifest: dict) -> dict:
-    """本次 Node 5 使用的DSM 分段与显示范围（block_features 摘要），缺省取当前默认值。"""
+    """优先读取本次 Node 5 的分段、显示范围和阈值。"""
     summary = manifest.get('extensions', {}).get('block_features') or {}
     defaults = GlobalPreprocessConfig()
-    return {'has_dsm': summary.get('height_source') == 'dsm',
+    config = {**(manifest.get('config') or {}), **(summary.get('settings') or {})}
+    thresholds = {key: summary.get(key, config.get(f'feature_{key}', getattr(defaults, f'feature_{key}')))
+                  for key in ('semantic_max_road_pct', 'semantic_min_plant_pct',
+                              'height_flat_min_pct', 'height_below_max_pct', 'step_height_m')}
+    return {**thresholds, 'semantic_judged': summary.get('semantic_judged', summary.get('height_source') != 'dsm'),
+            'has_dsm': summary.get('height_source') == 'dsm',
             'bands_m': tuple(summary.get('height_bands_m') or defaults.feature_dsm_height_bands_m),
             'vis_max_m': summary.get('height_vis_max_m', defaults.feature_height_vis_max_m)}
 
@@ -84,14 +90,58 @@ def _legend(width: int, font: ImageFont.ImageFont, settings: dict) -> Image.Imag
     return image
 
 
+def _metric_rows(block: dict, settings: dict, labels: list[str]) -> list[tuple]:
+    features = block.get('features') or {}
+    diagnosis = features.get('degradation') or {}
+    classes = features.get('class_pct') or {}
+    bands = features.get('height_band_pct') or {}
+    semantic_heading = '语义占比 · 两项同时满足' if settings['semantic_judged'] else '语义占比 · 未启用'
+    rows = [(semantic_heading, None, '', False)]
+    for key, label, symbol, threshold, compare in (
+        ('road', '道路', '<', settings['semantic_max_road_pct'], operator.lt),
+        ('building', '建筑', '', None, None),
+        ('plant', '植被', '>', settings['semantic_min_plant_pct'], operator.gt),
+        ('other', '其他', '', None, None),
+    ):
+        value = diagnosis.get(f'semantic_{key}_pct', classes.get(key))
+        active = settings['semantic_judged'] and threshold is not None
+        criterion = f'{symbol} {threshold:g}%' if threshold is not None else '—'
+        hit = active and value is not None and compare(value, threshold)
+        rows.append((label, '—' if value is None else f'{value:.1f}%', criterion, hit))
+    if labels:
+        rows.append(('高程占比 · 任一项满足', None, '', False))
+        reasons = diagnosis.get('height_reasons') or []
+        for index, label in enumerate(labels):
+            value = bands.get(label)
+            criterion = f"> {settings['height_flat_min_pct']:g}%" if index == 0 else '—'
+            rows.append((label, '—' if value is None else f'{value:.1f}%', criterion, index == 0 and 'flat' in reasons))
+        value = diagnosis.get('height_below_pct')
+        rows.append(('阶跃低于路面', '—' if value is None else f'{value:.1f}%',
+                     f"> {settings['height_below_max_pct']:g}%", 'below_road' in reasons))
+    kind = degradation_kind(block)
+    assessed = any(diagnosis.get(key) is not None for key in ('semantic_degraded', 'height_degraded'))
+    status = KIND_ZH[kind] if kind else '未触发' if assessed else '无法判断'
+    rows.append(('Node 5 初筛', status, '', kind is not None))
+    if 'height' in block.get('review_types_available', ()):
+        reference = features.get('road_reference') or {}
+        stats = features.get('height_stats') or {}
+        if reference.get('valid') is False:
+            rows.append(('送高程复核', '路面基准无效', '', False))
+        elif stats.get('center_step_above'):
+            rows.append(('送高程复核', '中心向上阶跃', f"≥ {settings['step_height_m']:g} m", False))
+    return rows
+
+
 def render_sheet(manifest: dict, blocks: list[dict], target: Path, title: str = '', thumb: int = 400) -> Path:
     settings = _settings(manifest)
     panels = SEMANTIC_PANELS+(HEIGHT_PANELS if settings['has_dsm'] else ())
     title_font, head_font, text_font, bold_font = _font(24, True), _font(18, True), _font(15), _font(15, True)
     gap, header = 10, 34
     labels = band_labels(settings['bands_m']) if settings['has_dsm'] else []
-    width = (len(panels)+1)*(thumb+gap)+gap
-    row_height = max(thumb, (10+len(labels))*24)+28+header+2*gap
+    metric_width = max(350, thumb)
+    width = len(panels)*(thumb+gap)+metric_width+2*gap
+    metrics = [_metric_rows(block, settings, labels) for block in blocks]
+    row_height = max(thumb, (1+max(map(len, metrics), default=0))*24)+28+header+2*gap
     title_h = 44 if title else 0
     legend = _legend(width, text_font, settings)
     sheet = Image.new('RGB', (width, title_h+legend.height+row_height*len(blocks)), 'white')
@@ -101,7 +151,7 @@ def render_sheet(manifest: dict, blocks: list[dict], target: Path, title: str = 
     sheet.paste(legend, (0, title_h))
     y = title_h+legend.height
     res = manifest['resolution_m_per_px']
-    for block in blocks:
+    for block, rows in zip(blocks, metrics):
         kind = degradation_kind(block)
         draw.rectangle([0, y, width, y+header-6], fill=(235, 235, 235))
         if kind is not None:
@@ -124,32 +174,21 @@ def render_sheet(manifest: dict, blocks: list[dict], target: Path, title: str = 
                                          Image.Resampling.LANCZOS)
                     sheet.paste(image, (left+(thumb-image.width)//2, top+24+(thumb-image.height)//2))
         left = len(panels)*(thumb+gap)+gap
-        features = block.get('features') or {}
-        diagnosis = features.get('degradation') or {}
-        classes = features.get('class_pct') or {}
-        bands = features.get('height_band_pct') or {}
-        rows = [('语义占比', None), *((label, classes.get(key)) for key, label in
-                                     zip(('road', 'building', 'plant', 'other'), ('道路', '建筑', '植被', '其他')))]
-        if labels:
-            rows += [('高程占比', None), *((label, bands.get(label)) for label in labels),
-                     ('阶跃低于路面', diagnosis.get('height_below_pct'))]
-        judged = diagnosis.get('height_degraded' if settings['has_dsm'] else 'semantic_degraded')
-        status = KIND_ZH[kind] if kind else '未触发' if judged is False else '无法判断'
-        reasons = {'flat': '平坦', 'below_road': '阶跃低于路面'}
-        detail = '、'.join(reasons[key] for key in diagnosis.get('height_reasons', []) if key in reasons)
-        rows += [('Node 5 初筛', None), (f'{status} · {detail}' if detail else status, None)]
-        headings = {'语义占比', '高程占比', 'Node 5 初筛'}
-        for index, (label, value) in enumerate(rows):
+        value_x, criterion_x = left+metric_width-116, left+metric_width-8
+        draw.text((left+8, top+12), '指标', fill=BLUE, font=bold_font, anchor='lm')
+        draw.text((value_x, top+12), '数值 / 结果', fill=BLUE, font=bold_font, anchor='rm')
+        draw.text((criterion_x, top+12), '退化标准', fill=BLUE, font=bold_font, anchor='rm')
+        for index, (label, value, criterion, hit) in enumerate(rows, start=1):
             middle = top+12+index*24
-            section = label in headings
-            last = index == len(rows)-1
-            fill = (229, 237, 247) if section else (247, 248, 250) if index % 2 else 'white'
-            draw.rectangle([left, middle-12, left+thumb, middle+11], fill=fill)
-            draw.text((left+8, middle), label, fill=RED if last and kind else BLUE if section else 'black',
-                      font=bold_font if section or last else text_font, anchor='lm')
-            if not section and not last:
-                draw.text((left+thumb-8, middle), '—' if value is None else f'{value:.1f}%',
-                          fill='black', font=text_font, anchor='rm')
+            section = value is None
+            fill = (229, 237, 247) if section else (255, 236, 236) if hit else (247, 248, 250) if index % 2 else 'white'
+            draw.rectangle([left, middle-12, left+metric_width, middle+11], fill=fill)
+            color = RED if hit else BLUE if section else 'black'
+            draw.text((left+8, middle), label, fill=color,
+                      font=bold_font if section or hit else text_font, anchor='lm')
+            if not section:
+                draw.text((value_x if criterion else criterion_x, middle), value, fill=color, font=text_font, anchor='rm')
+                draw.text((criterion_x, middle), criterion, fill=color, font=text_font, anchor='rm')
         y += row_height
         draw.line([0, y-gap//2, width, y-gap//2], fill=(200, 200, 200), width=1)
     target.parent.mkdir(parents=True, exist_ok=True)

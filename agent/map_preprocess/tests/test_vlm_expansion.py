@@ -196,14 +196,14 @@ class PromptSystemTests(unittest.TestCase):
     def test_tier_uses_same_rule_as_node6(self):
         for kind in ('semantic', 'height'):
             rules = load_review_system(kind)['rules']
-            self.assertIs(derive_tier(tier_for(kind, 80), kind, '道路', rules)['degraded'], True)
-            self.assertIs(derive_tier(tier_for(kind, 80, '不退化'), kind, '道路', rules)['degraded'], False)
-            self.assertIsNone(derive_tier(tier_for(kind, 80, '未知'), kind, '道路', rules)['degraded'])
+            self.assertIs(derive_tier(tier_for(kind, 80), kind, rules)['degraded'], True)
+            self.assertIs(derive_tier(tier_for(kind, 80, '不退化'), kind, rules)['degraded'], False)
+            self.assertIsNone(derive_tier(tier_for(kind, 80, '未知'), kind, rules)['degraded'])
 
     def test_reason_can_change_between_tiers(self):
         """原原因消失而其它条件成立时仍退化：基准是侵入，当前档只有纵向重复。"""
         rules = load_review_system('semantic')['rules']
-        derived = derive_tier(tier_for('semantic', 80, '纵向退化'), 'semantic', '道路', rules)
+        derived = derive_tier(tier_for('semantic', 80, '纵向退化'), 'semantic', rules)
         self.assertIs(derived['degraded'], True)
         self.assertEqual(derived['degradation_type'], '纵向退化')
         self.assertEqual(derived['matched_reasons'], ['vlm_verdict'])
@@ -213,21 +213,20 @@ class PromptSystemTests(unittest.TestCase):
         tier = tier_for('height', 80, '不退化')
         del tier['height_check']['verdict']
         tier['height_check']['height_distinctiveness_confidence'] = '低'
-        self.assertIsNone(derive_tier(tier, 'height', '道路', rules)['degraded'])
+        self.assertIsNone(derive_tier(tier, 'height', rules)['degraded'])
         tier = tier_for('height', 80, '不退化')
         del tier['height_check']['verdict']
         tier['data_check']['data_confidence'] = '低'
-        self.assertIsNone(derive_tier(tier, 'height', '道路', rules)['degraded'])
+        self.assertIsNone(derive_tier(tier, 'height', rules)['degraded'])
 
-    def test_inherited_area_type_participates_in_consistency(self):
-        """广场继承“不适用”合法；道路填“不适用”被屏蔽，新版仍以模型结论为准。"""
+    def test_expansion_does_not_depend_on_area_type(self):
+        """两个结构字段均不适用时，仍以模型结论为准。"""
         rules = load_review_system('semantic')['rules']
         tier = tier_for('semantic', 80, '不退化')
         tier['degradation_check'].update(road_geometry='不适用', longitudinal_structure='不适用')
-        self.assertIs(derive_tier(tier, 'semantic', '铺装广场', rules)['degraded'], False)
-        derived = derive_tier(tier, 'semantic', '道路', rules)
+        derived = derive_tier(tier, 'semantic', rules)
         self.assertIs(derived['degraded'], False)
-        self.assertTrue(derived['consistency_failures'])
+        self.assertFalse(derived['consistency_failures'])
 
 
 class CoverageTests(unittest.TestCase):
@@ -396,11 +395,11 @@ class PipelineTests(node5.BlockFeatureTests):
             metadata = read_json(resolve_path(summary['inputs_dir'])/one/f'{kind}_metadata.json')
             description = sent['image_description']
             self.assertIn(sent['image_description'], call['prompt'])
-            for word in ('实线=64 m', '短虚线=80 m', '点线=100 m', '有效评估档位：80 m、100 m', '继承的地面类型：道路'):
+            for word in ('实线=64 m', '短虚线=80 m', '点线=100 m', '有效评估档位：80 m、100 m'):
                 self.assertIn(word, description)
             for key in ('image_global_bbox', 'center_image_xy', 'ring_nodata_pct', 'windows'):
                 self.assertIn(key, metadata)
-            self.assertNotIn(str(metadata['image_global_bbox'][0]), description)
+            self.assertNotIn(str(metadata['image_global_bbox']), description)
             self.assertNotIn('%', description)
             for prior in ('已确认退化', '证据摘要', metadata['node6']['evidence']):
                 self.assertNotIn(prior, description)
@@ -422,21 +421,22 @@ class PipelineTests(node5.BlockFeatureTests):
 
     def test_map_boundary_removes_frames_and_skips_vlm(self):
         (one, two), _ = self.block_ids()
-        # 左边界距离 34 px：64 m 完整、80 m 越界；距离 42 px：80 m 完整、100 m 越界（1 m/px）
+        # 贴边块在图幅足够时向内平移扩展；超过整图尺寸的档位仍被 map_boundary 剔除
         path, _ = self.reviewed({one: {'height': 'degraded'}, two: {'height': 'degraded'}}, {one: (34, 350), two: (42, 350)})
-        summary, client, extents = self.expand(path, {(two, 'height'): answer_for('height', two, {80: '退化'})})
-        self.assertEqual([c['block_id'] for c in client.calls], [two])
-        self.assertEqual((extents[(one, 'height')]['max_size_m'], extents[(one, 'height')]['stop_reason']), (64, 'map_boundary'))
-        self.assertEqual(extents[(one, 'height')]['valid_tiers_m'], [])
-        self.assertEqual({t['state'] for t in extents[(one, 'height')]['tiers'][1:]}, {NOT_EVALUATED})
-        self.assertEqual((extents[(two, 'height')]['max_size_m'], extents[(two, 'height')]['stop_reason']), (80, 'map_boundary'))
-        self.assertEqual(extents[(two, 'height')]['valid_tiers_m'], [80])
-        self.assertEqual(extents[(two, 'height')]['tiers'][2]['not_evaluated_reason'], 'map_boundary')
+        self.config = replace(self.config, vlm_expansion_sizes_m=(80., 900.))
+        answers = {(one, 'height'): answer_for('height', one, {80: '退化'}),
+                   (two, 'height'): answer_for('height', two, {80: '退化'})}
+        summary, client, extents = self.expand(path, answers)
+        self.assertEqual(sorted(c['block_id'] for c in client.calls), [one, two])
+        for bid in (one, two):
+            self.assertEqual((extents[(bid, 'height')]['max_size_m'], extents[(bid, 'height')]['stop_reason']), (80, 'map_boundary'))
+            self.assertEqual(extents[(bid, 'height')]['valid_tiers_m'], [80])
+            self.assertEqual(extents[(bid, 'height')]['tiers'][2]['not_evaluated_reason'], 'map_boundary')
         metadata = read_json(resolve_path(summary['inputs_dir'])/two/'height_metadata.json')
         self.assertEqual(sorted(metadata['frames']), ['64', '80'])
         self.assertEqual(metadata['image_extent_m'], [80., 80.])
         self.assertEqual(list(client.calls[0]['schema']['properties']['tiers']['required']), ['size_80'])
-        self.assertNotIn('100 m', read_json(resolve_path(summary['inputs_dir'])/two/'height_input.json')['image_description'])
+        self.assertNotIn('900 m', read_json(resolve_path(summary['inputs_dir'])/two/'height_input.json')['image_description'])
 
     def test_branch_coverage_differs_by_required_data(self):
         """DSM 只覆盖部分地图：height 被边界剔除，同位置 semantic 仍可扩展。"""
@@ -460,7 +460,7 @@ class PipelineTests(node5.BlockFeatureTests):
 
     def test_incomplete_base_is_skipped_and_node6_kept(self):
         (one, two), _ = self.block_ids()
-        # 中心距左边界 20 px：Node 6 只覆盖 52 m 宽；另一块 Node 6 完整但基准落在 DSM 足迹外
+        # 中心距左边界 20 px：贴边块向内扩展；另一块 Node 6 完整但基准落在 DSM 足迹外，仍按 base_incomplete 保留基准
         path, before = self.reviewed({one: {'height': 'degraded'}, two: {'height': 'degraded'}}, {one: (20, 350), two: (450, 350)})
         self.assertLess(before['blocks'][0]['vlm_review']['reviews']['height']['coverage']['image_extent_m'][0], 64)
         original = ei.coverage_grids
@@ -472,16 +472,17 @@ class PipelineTests(node5.BlockFeatureTests):
             return grids
         ei.coverage_grids = narrow_dsm
         self.addCleanup(setattr, ei, 'coverage_grids', original)
-        summary, client, extents = self.expand(path, {})
-        self.assertEqual(client.calls, [])
-        for block_id in (one, two):   # 不扩展、不调用 VLM，但保留 Node 6 的基准结论进入融合
-            result = extents[(block_id, 'height')]
-            self.assertEqual((result['status'], result['skip_reason'], result['max_size_m'], result['stop_reason']),
-                             ('completed', None, 64, 'base_incomplete'))
-            self.assertEqual(result['tiers'][0]['source'], 'node6')
-            self.assertEqual({t['state'] for t in result['tiers'][1:]}, {NOT_EVALUATED})
-            self.assertIs(result['node6']['degraded'], True)
-        self.assertEqual(extents[(two, 'height')]['base_problem'], {'missing_sources': ['dsm']})
+        answers = {(one, 'height'): answer_for('height', one, {80: '退化', 100: '不退化'})}
+        summary, client, extents = self.expand(path, answers)
+        self.assertEqual([c['block_id'] for c in client.calls], [one])
+        self.assertEqual(extents[(one, 'height')]['max_size_m'], 80)
+        result = extents[(two, 'height')]
+        self.assertEqual((result['status'], result['skip_reason'], result['max_size_m'], result['stop_reason']),
+                         ('completed', None, 64, 'base_incomplete'))
+        self.assertEqual(result['tiers'][0]['source'], 'node6')
+        self.assertEqual({t['state'] for t in result['tiers'][1:]}, {NOT_EVALUATED})
+        self.assertIs(result['node6']['degraded'], True)
+        self.assertEqual(result['base_problem'], {'missing_sources': ['dsm']})
         self.assertEqual(summary['skipped'], {})
         self.assertEqual(summary['completed_count'], 2)
         self.assertEqual(load_manifest(path)['blocks'], before['blocks'])
@@ -638,6 +639,15 @@ class PipelineTests(node5.BlockFeatureTests):
         nodes = list(build_graph(config=config).get_graph().nodes)
         self.assertLess(nodes.index('vlm_review_blocks'), nodes.index('vlm_expand_blocks'))
         self.assertLess(nodes.index('vlm_expand_blocks'), nodes.index('refresh_global_manifest'))
+
+    def test_edge_clipped_block_expands_inward(self):
+        block = {'global_xy': [30., 100.]}
+        win = ve.inward_window(block, 100., 1., (200, 200))
+        self.assertEqual(win, [0, 50, 100, 150])
+        full = np.ones((200, 200), bool)
+        grids = {'factor': 1, 'rgb': full, 'semantic': full}
+        valid, _ = ve.valid_tiers(block, 'semantic', [100.], grids, (200, 200), 1.)
+        self.assertEqual(valid, [100.])
 
 
 # 继承的 Node 5 用例在本文件不重复运行

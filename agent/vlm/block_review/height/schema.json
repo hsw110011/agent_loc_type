@@ -8,7 +8,6 @@
     "review_type",
     "observations",
     "schema_version",
-    "drivable_check",
     "data_check",
     "height_check"
   ],
@@ -49,50 +48,7 @@
     },
     "schema_version": {
       "type": "integer",
-      "const": 11
-    },
-    "drivable_check": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "evidence",
-        "area_type",
-        "area_type_confidence",
-        "uncertainty"
-      ],
-      "properties": {
-        "evidence": {
-          "type": "string",
-          "minLength": 1,
-          "description": "本项可见证据及其位置"
-        },
-        "area_type": {
-          "type": "string",
-          "enum": [
-            "道路",
-            "铺装广场",
-            "停车场或硬化场院",
-            "未铺装便道或压实土场",
-            "不可通行",
-            "未知"
-          ],
-          "description": "地面类型；无法确认用 未知"
-        },
-        "area_type_confidence": {
-          "type": "string",
-          "enum": [
-            "高",
-            "中",
-            "低"
-          ],
-          "description": "area_type 的独立置信度；低 时程序将该字段视为 未知"
-        },
-        "uncertainty": {
-          "type": "string",
-          "minLength": 1,
-          "description": "本项无法确认的因素；没有写“无”"
-        }
-      }
+      "const": 12
     },
     "data_check": {
       "type": "object",
@@ -302,20 +258,11 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "result",
             "evidence_refs",
-            "reason"
+            "reason",
+            "result"
           ],
           "properties": {
-            "result": {
-              "type": "string",
-              "enum": [
-                "退化",
-                "纵向退化",
-                "不退化",
-                "证据不足"
-              ]
-            },
             "evidence_refs": {
               "type": "array",
               "uniqueItems": true,
@@ -334,6 +281,15 @@
               "type": "string",
               "minLength": 1,
               "description": "指出支持最终判断的对照位置和高程证据"
+            },
+            "result": {
+              "type": "string",
+              "enum": [
+                "退化",
+                "纵向退化",
+                "不退化",
+                "证据不足"
+              ]
             }
           }
         }

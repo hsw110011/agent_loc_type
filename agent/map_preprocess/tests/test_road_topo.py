@@ -59,7 +59,7 @@ class CleanRoadGraphTest(unittest.TestCase):
                                              fallback_resolution_m_per_px=.5, road_max_shared_gap_m=10.)
 
     def run_node(self) -> dict:
-        with patch('agent.map_preprocess.nodes.semantic_roads.whole_image_semantic', return_value=(self.labels, None, {'cache_hit': True})), redirect_stdout(io.StringIO()):
+        with patch('agent.map_preprocess.nodes.semantic_roads.whole_image_semantic', side_effect=AssertionError('Node 3 must not run semantic segmentation')), redirect_stdout(io.StringIO()):
             return clean_road_graph(self.state, config=self.config)
 
     def test_output_matches_downstream_contract(self):
@@ -158,6 +158,18 @@ class AreaRegionTests(unittest.TestCase):
         self.assertGreater(count, 0)
         # 只在圆盘离散边缘差零星像元（实测约 0.07%）
         self.assertLess(np.count_nonzero((labels > 0) != (old > 0)), old.sum()*.005)
+
+    def test_padded_border_mask_excludes_edge_padding_and_preserves_interior(self):
+        from agent.map_preprocess.nodes.global_pipeline import _padded_border_mask
+        rgb = np.full((40, 40, 3), 120, dtype=np.uint8)
+        rgb[-5:, :] = 255          # 底部纯白填充边
+        rgb[:, :4] = 0             # 左侧纯黑填充边
+        rgb[15:20, 15:20] = 255    # 内部白色屋顶（不与外边缘连通）
+        valid = np.ones((40, 40), dtype=bool)
+        masked = _padded_border_mask(rgb, valid, margin_px=2)
+        self.assertTrue(masked[-7:, :].all())
+        self.assertTrue(masked[:, :6].all())
+        self.assertFalse(masked[15:20, 15:20].any())
 
 if __name__ == '__main__':
     unittest.main()

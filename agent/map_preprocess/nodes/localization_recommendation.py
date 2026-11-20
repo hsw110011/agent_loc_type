@@ -19,7 +19,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from ..global_config import GlobalPreprocessConfig
+from ..global_config import GlobalPreprocessConfig, PIPELINE_VERSION
 from ..io import load_manifest, open_image, read_json, relative_path, resolve_path, write_json
 from .. import output_layout as layout
 from ..state import PreprocessState
@@ -32,7 +32,6 @@ IMAGE_LABELS = ['第 1 张：原始 RGB 影像']
 BOUNDARY_RGB = (255, 230, 0)
 METHOD_COLORS = {'gps': (40, 220, 60), 'lidar_inertial_slam': (40, 140, 255), 'wheel_imu_odometry': (255, 140, 0)}
 FAILED_COLOR = (150, 150, 150)
-REVIEW_COLOR = (255, 220, 0)
 
 
 def crop_box(bbox: list, width: int, height: int) -> list[int] | None:
@@ -160,7 +159,7 @@ def final_region(region: dict, output: dict, system: dict) -> dict:
     program = apply_program_rules(output, system['rules'])
     return {**unchanged_fields(region), 'recommended_method': output['recommended_method'], 'assessment': output['assessment'], 'reason': output['reason'],
             'visual_evidence': output['visual_evidence'], 'limitations': program['limitations'],
-            'recommendation_status': program['recommendation_status'], 'review_required': output['review_required'],
+            'recommendation_status': program['recommendation_status'],
             'union_polygon': region['union_polygon'], 'source_patch_ids': region['source_patch_ids']}
 
 
@@ -169,7 +168,7 @@ def failed_region(region: dict, error: str) -> dict:
 
 
 def render_overview(manifest: dict, config: GlobalPreprocessConfig, regions: list[dict], failed: list[dict], output: Path) -> Path:
-    """全图推荐结果：按定位方式着色，review_required 叠加黄框，失败区域为灰色。"""
+    """全图推荐结果：按定位方式着色，失败区域为灰色。"""
     from PIL import Image, ImageDraw
     from ..utils.global_render import read_preview
     preview, scale = read_preview(manifest['image'], config)
@@ -195,12 +194,10 @@ def render_overview(manifest: dict, config: GlobalPreprocessConfig, regions: lis
         for rings in union_rings(region):
             for ring in rings:
                 draw.line(scaled(ring), fill=color, width=2*width, joint='curve')
-        if region.get('review_required'):
-            draw.rectangle([value*scale for value in region['bbox']], outline=REVIEW_COLOR, width=width)
         suffix = f" {region['recommended_method']}" if 'recommended_method' in region else ' FAILED'
         suffix += ' (validate)' if region.get('recommendation_status') == 'requires_validation' else ''
         draw.text((region['bbox'][0]*scale+3, region['bbox'][1]*scale+1), region['region_id']+suffix, fill='white', font=font, stroke_width=2, stroke_fill='black')
-    legend = [*((color, name) for name, color in METHOD_COLORS.items()), (REVIEW_COLOR, 'review required'), (FAILED_COLOR, 'failed')]
+    legend = [*((color, name) for name, color in METHOD_COLORS.items()), (FAILED_COLOR, 'failed')]
     vi.add_legend(image, legend, 'Recommended auxiliary localization (satellite-based, needs online validation)').save(output)
     return output
 
@@ -245,7 +242,7 @@ def run_localization_recommendation(manifest_path: str | Path, config: GlobalPre
             else:
                 jobs.append(job)
         logger.info('Node 9：%d 个融合区域，VLM 任务 %d', len(regions), len(jobs))
-        summary: dict = {'status': 'dry_run' if dry_run else 'completed', 'schema_version': system['rules']['schema_version'], 'region_count': len(regions),
+        summary: dict = {'pipeline_version': PIPELINE_VERSION, 'status': 'dry_run' if dry_run else 'completed', 'schema_version': system['rules']['schema_version'], 'region_count': len(regions),
                          'job_count': len(jobs), 'inputs_dir': relative_path(input_dir), 'results_dir': relative_path(result_dir)}
         if dry_run:
             for job in jobs:
@@ -275,7 +272,7 @@ def run_localization_recommendation(manifest_path: str | Path, config: GlobalPre
                 logger.warning('Node 9：区域 %s 没有有效推荐（%s）', region['merged_id'], error)
                 failed.append(failed_region(region, error))
         overview = render_overview(manifest, config, results, failed, overview_path)
-        write_json(output, {'task_id': manifest.get('task_id'), 'image': manifest['image']['path'], 'resolution_m_per_px': manifest['resolution_m_per_px'],
+        write_json(output, {'pipeline_version': PIPELINE_VERSION, 'task_id': manifest.get('task_id'), 'image': manifest['image']['path'], 'resolution_m_per_px': manifest['resolution_m_per_px'],
                             'coordinate_system': 'global_pixel', 'schema_version': system['rules']['schema_version'],
                             'meaning': '推荐仅基于卫星影像的环境线索，不代表定位效果已验证',
                             'regions': results, 'failed_regions': failed})
@@ -283,16 +280,16 @@ def run_localization_recommendation(manifest_path: str | Path, config: GlobalPre
         for region in results:
             methods[region['recommended_method']] = methods.get(region['recommended_method'], 0)+1
         summary.update({'status': 'partial' if failed else 'completed', 'recommended_count': len(results), 'failed_count': len(failed),
-                        'method_counts': methods, 'review_required_count': sum(region['review_required'] for region in results),
+                        'method_counts': methods,
                         'errors': [{'region_id': region['region_id'], 'error': region['error']} for region in failed],
-                        'regions': [{key: region[key] for key in ('region_id', 'degradation_type', 'bbox', 'recommended_method', 'recommendation_status', 'review_required')}
+                        'regions': [{key: region[key] for key in ('region_id', 'degradation_type', 'bbox', 'recommended_method', 'recommendation_status')}
                                     for region in results],
                         'failed_region_ids': [region['region_id'] for region in failed],
                         'localization_recommendations': relative_path(output), 'overview': relative_path(overview)})
         manifest.setdefault('extensions', {})['localization_recommendation'] = summary
         manifest['files'].update({'localization_recommendations': relative_path(output), 'localization_recommendation_overview': relative_path(overview)})
         publish_stage(manifest_path, manifest, 'localization_recommendation')
-        logger.info('Node 9 完成：推荐 %d（%s），需人工复核 %d，失败 %d', len(results), methods, summary['review_required_count'], len(failed))
+        logger.info('Node 9 完成：推荐 %d（%s），失败 %d', len(results), methods, len(failed))
         return summary
 
 

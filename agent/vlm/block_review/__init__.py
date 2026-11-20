@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 
 REVIEW_TYPES = ('semantic', 'height')
@@ -58,9 +59,8 @@ def load_review_system(review_type: str, root: str | Path | None = None) -> dict
     if rules['review_type'] != review_type or rules['schema_version'] != schema['properties']['schema_version']['const']:
         raise ValueError(f'{directory} 的 rule/schema 版本或类型不一致')
     check_name = 'degradation_check' if review_type == 'semantic' else 'height_check'
-    road_fields = schema['properties']['drivable_check']['properties']
     data_fields = schema['properties']['data_check']['properties']
-    fields = {**road_fields, **schema['properties'][check_name]['properties']}
+    fields = schema['properties'][check_name]['properties']
     contexts = {k: v.get('enum', []) for k, v in fields.items()}
     contexts.update(data_status=data_fields['status']['enum'], data_confidence=data_fields['data_confidence']['enum'],
                     consistency_check=CONSISTENCY_VALUES)
@@ -80,10 +80,6 @@ def load_review_system(review_type: str, root: str | Path | None = None) -> dict
                 raise ValueError(f'规则条件与 schema 不一致：{key}={values}')
             if key not in NON_JUDGED_KEYS and f'{key}_confidence' not in contexts:
                 raise ValueError(f'判定字段 {key} 缺少 {key}_confidence')
-    areas = road_fields['area_type']['enum']
-    if set(rules['drivable_result']) != set(areas) or any(
-            value is not None and type(value) is not bool for value in rules['drivable_result'].values()):
-        raise ValueError('drivable_result 与 schema 不一致')
     for constraint in rules['consistency_checks']['rules']:
         if not constraint.get('when') or not constraint.get('invalidate') or not constraint.get('reason'):
             raise ValueError('一致性约束必须包含 when、invalidate 和 reason')
@@ -92,7 +88,7 @@ def load_review_system(review_type: str, root: str | Path | None = None) -> dict
                     or any(v not in contexts[key] or v in ('未知', '不确定') for v in values)):
                 raise ValueError(f'一致性约束条件与 schema 不一致：{key}={values}')
         for key in constraint['invalidate']:
-            unknown = '未知' if key == 'area_type' else '不确定'
+            unknown = '不确定'
             if key not in fields or f'{key}_confidence' not in fields or unknown not in contexts[key]:
                 raise ValueError(f'一致性约束不能屏蔽字段 {key}')
     # 规则映射用于解释没有 verdict 的旧记录，新请求发送观察和判定准则。
@@ -111,18 +107,35 @@ def _apply_consistency(context: dict, rules: dict) -> tuple[dict, list[dict]]:
         if all(context[key] in values for key, values in constraint['when'].items()):
             failures.append({'reason': constraint['reason'], 'fields': list(constraint['invalidate'])})
             for key in constraint['invalidate']:
-                effective[key] = '未知' if key == 'area_type' else '不确定'
+                effective[key] = '不确定'
     return effective, failures
 
 
 def _apply_low_confidence(fields: dict) -> dict:
-    """rule.preprocess：<字段名>_confidence=低 的字段视为 未知（area_type）或 不确定，其余字段不变。"""
+    """rule.preprocess：<字段名>_confidence=低 的字段视为 不确定，其余字段不变。"""
     result = dict(fields)
     for key, value in fields.items():
         if key.endswith('_confidence') and value == '低':
             name = key.removesuffix('_confidence')
-            result[name] = '未知' if name == 'area_type' else '不确定'
+            result[name] = '不确定'
     return result
+
+
+_NON_DEGRADED_REASON = re.compile(
+    r'(?:判(?:定)?(?:为)?不退化|匹配不退化|整体不退化|该?区域[^，。；]{0,6}不退化|不构成退化|无(?:明确)?退化证据)'
+)
+_DEGRADED_REASON = re.compile(
+    r'(?<![不非未无没])(?<!并非)(?<!不是)(?:判(?:定)?(?:为)?(?:纵向)?退化|构成(?:纵向)?退化|满足(?:纵向)?退化条件)'
+)
+
+
+def _verdict_contradicts_reason(verdict: dict) -> bool:
+    result, reason = verdict['result'], verdict['reason']
+    if result in ('退化', '纵向退化'):
+        return bool(_NON_DEGRADED_REASON.search(reason))
+    if result == '不退化':
+        return bool(_DEGRADED_REASON.search(reason))
+    return False
 
 
 def verdict_evidence_problem(check: dict, data: dict, ring_evidence: str | None) -> str | None:
@@ -130,6 +143,8 @@ def verdict_evidence_problem(check: dict, data: dict, ring_evidence: str | None)
     verdict = check['verdict']
     if 'evidence_refs' not in verdict or verdict['result'] == '证据不足':
         return None
+    if _verdict_contradicts_reason(verdict):
+        return 'verdict_reason_contradiction'
     if data['status'] in ('不可用', '不确定') or data['data_confidence'] == '低':
         return 'insufficient_data'
 
@@ -138,16 +153,20 @@ def verdict_evidence_problem(check: dict, data: dict, ring_evidence: str | None)
     along = {f'A{i}' for i, item in enumerate(positions, 1)
              if item['position'].strip() and item['observation'].strip()}
     if 'road_comparisons' in check:
+        primary_filled = {f'R{i}' for i, item in enumerate(check['road_comparisons'], 1)
+                          if item['position'].strip() and item['rgb_evidence'].strip()}
         primary = {f'R{i}' for i, item in enumerate(check['road_comparisons'], 1)
                    if item['position'].strip() and item['rgb_evidence'].strip()
                    and item['rgb_basis'] != '无法确认' and item['semantic_road'] != '无法判读'}
         if check['evidence'].strip() and check['dominance'] == '明显占优' and check['road_boundary'] in ('模糊', '消失') and (
                 check['dominance_confidence'] != '低' and check['road_boundary_confidence'] != '低'):
             primary.add('E')
+            primary_filled.add('E')
     else:
         primary = {'H'} if check['height_comparisons']['road_and_surroundings'].strip() else set()
+        primary_filled = set(primary)
     ring = {'N'} if ring_evidence and ring_evidence.strip() else set()
-    if not refs or refs - (primary | along | ring) or (ring_evidence is not None and 'N' not in refs):
+    if not refs or refs - (primary_filled | along | ring) or (ring_evidence is not None and 'N' not in refs):
         return 'invalid_evidence_refs'
     if verdict['result'] == '纵向退化':
         if (not {'A1', 'A2'} <= refs
@@ -167,7 +186,7 @@ def derive_review(output: dict, rules: dict, *, evidence_problem: str | None = N
     """先处理置信度和局部矛盾，再匹配规则；候选原因与最终确认原因分开记录。"""
     data = output['data_check']
     check = output['degradation_check' if output['review_type'] == 'semantic' else 'height_check']
-    observed = {**output['drivable_check'], **check, 'data_status': data['status'],
+    observed = {**check, 'data_status': data['status'],
                 'data_confidence': data['data_confidence']}
     normalized = _apply_low_confidence(observed)
     context, failures = _apply_consistency(normalized, rules)
@@ -190,14 +209,10 @@ def derive_review(output: dict, rules: dict, *, evidence_problem: str | None = N
             'when': {},
         }
         matched = [decision]
-    drivable = rules['drivable_result'][context['area_type']]
     candidate_reasons = list(dict.fromkeys(
         d['reason'] for d in rules['degradation_decision'] if d['result'] is True
         and all(candidates[key] in values for key, values in d['when'].items())))
     confirmed_reasons = list(dict.fromkeys(d['reason'] for d in matched if d['result'] is True))
-    # decision_ignores_area：退化结论不看地面类型，可行驶只在明确不可通行时才否决（块会被删除）
-    ignores_area = bool(rules.get('decision_ignores_area'))
-    usable = drivable is not False if ignores_area else drivable is True
     trace = {
         'selected_rule': decision['reason'],
         'conditions': {key: {'effective': context[key], 'accepted': values}
@@ -205,8 +220,6 @@ def derive_review(output: dict, rules: dict, *, evidence_problem: str | None = N
         'adjustments': {key: {'observed': value, 'after_confidence': normalized[key], 'effective': context[key]}
                         for key, value in observed.items()
                         if value != normalized[key] or normalized[key] != context[key]},
-        'area_type': context['area_type'],
-        'passes_drivability_gate': usable,
     }
     if verdict:
         trace.update(reason=verdict['reason'], **{field: check[field] for field in
@@ -217,9 +230,9 @@ def derive_review(output: dict, rules: dict, *, evidence_problem: str | None = N
         if evidence_problem:
             trace['override'] = {'reason': evidence_problem, 'original_verdict': verdict['result']}
         candidate_reasons = []
-    return {'decision_trace': trace, 'is_drivable': drivable, 'degraded': decision['result'], 'decision_ignores_area': ignores_area,
-            'keep': usable and decision['result'] is True, 'reason_code': decision['reason'],
+    return {'decision_trace': trace, 'degraded': decision['result'],
+            'keep': decision['result'] is True, 'reason_code': decision['reason'],
             'degradation_type': decision['degradation_type'], 'consistency_check': consistency,
-            'consistency_failures': failures, 'effective_area_type': context['area_type'],
+            'consistency_failures': failures,
             'matched_reasons': confirmed_reasons if decision['result'] is True else [],
             'candidate_reasons': candidate_reasons}

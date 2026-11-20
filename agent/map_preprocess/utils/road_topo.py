@@ -1280,7 +1280,7 @@ def run(road_path: str | Path, semantic_path: str | Path, gsd: float, out: str |
 
 
 def run_arrays(road: np.ndarray, semantic: np.ndarray, gsd: float, out: str | Path, cfg: SimpleNamespace | None = None,
-               geotiff: str | None = None, vis_out: str | Path | None = None, log=print) -> tuple[nx.MultiGraph, list[dict], list[np.ndarray]]:
+               geotiff: str | None = None, vis_out: str | Path | None = None, log=print, *, road_only: bool = False) -> tuple[nx.MultiGraph, list[dict], list[np.ndarray]]:
     """完整流程。out 放数据（graph.pkl、network.geojson、stats.json），vis_out 放图片，默认同 out。返回 (图, 每步统计, 删掉的分支点列)。"""
     cfg = cfg or load_config()
     steps = cfg.steps
@@ -1294,20 +1294,28 @@ def run_arrays(road: np.ndarray, semantic: np.ndarray, gsd: float, out: str | Pa
     R, S, info = preprocess_masks(road, semantic, cfg, gsd)
     report.mask('01_road_R', R, '1 road extraction R', info)
     report.mask('02_semantic_S', S, '2 semantic road S')
-    mask, core, rejected, info = fuse_masks(R, S, cfg, gsd)
+    if road_only:
+        mask, core, rejected, info = R.copy(), R, S, {'source': 'MaGRoad only', 'core_px': int(R.sum())}
+    else:
+        mask, core, rejected, info = fuse_masks(R, S, cfg, gsd)
     report.mask('03_fused', mask, '3 fused (green=r_only kept, red=r_only rejected)', info,
                 layers=(((mask > 0) & (core == 0), (60, 220, 60)), (rejected > 0, (0, 0, 255))))
     bridges: list[dict] = []
     before = mask.copy()
-    if steps.occlusion:
+    if steps.occlusion and not road_only:
         mask, bridges = bridge_occlusions(mask, semantic, cfg, gsd)
-    report.mask('04_occlusion', mask, '4 occlusion bridges (green)', {'bridges': len(bridges), 'detail': bridges}, layers=(((mask > 0) & (before == 0), (60, 220, 60)),))
+    occlusion_added = (mask > 0) & (before == 0)
+    report.mask('04_occlusion', mask, '4 occlusion bridges (green)', {'bridges': len(bridges), 'detail': bridges}, layers=((occlusion_added, (60, 220, 60)),))
+    del before
     holes = 0
     if steps.fill_holes:
         mask, holes = fill_holes(mask, cfg.cleanup.hole_m2, gsd)
     if steps.smooth_mask:
         mask = smooth_mask(mask, cfg, gsd)
     report.mask('05_cleaned', mask, '5 holes filled, boundary smoothed', {'filled_holes': holes})
+    from agent.map_preprocess.output_layout import CLEANED_ROAD_REFERENCE_MASK
+    np.save(out/CLEANED_ROAD_REFERENCE_MASK, (mask > 0) & ~occlusion_added, allow_pickle=False)
+    del occlusion_added
     regions, region_count = np.zeros_like(mask, np.int32), 0
     if steps.area_regions:
         regions, region_count = mark_area_regions(mask, semantic, cfg, gsd)

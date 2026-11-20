@@ -2,41 +2,15 @@
 # when 的不同字段为 AND，同一字段列表为 OR；degradation_decision 首条命中决定最终结论，一致性约束同时检查。
 # candidate_reasons 是候选；matched_reasons 仅记录最终确认的退化原因。
 review_type: semantic
-schema_version: 10
-# true：退化结论不看地面类型。area_type 及其可行驶映射只决定是否保留本块，不参与 degradation_decision。
-decision_ignores_area: true
+schema_version: 11
 scale: 根据本次图像说明的实际覆盖宽高，将图中相对距离换算为米；以图像说明给出的中心位置为观察中心，不默认图像正中
-drivable:
-  purpose: 只用于决定是否保留本块；不可通行才删块，退化结论不看这里的结果
-  object: 区域中心约 10 m 内与道路方向相符的地面，中心位置允许有小幅偏移
-  area_types:
-    道路: 线状道路、路口、桥面、土路；被树荫或阴影遮挡，但能从遮挡两端、缝隙露出的路面或路旁结构的走向推断出的道路
-    铺装广场: 铺装广场
-    停车场或硬化场院: 停车场、硬化场院、厂区空地
-    未铺装便道或压实土场: 施工便道、车辙、压实土场
-    不可通行: RGB 有明确正证据，能确认中心约 10 m 内及沿线为不可行驶地面，例如可辨认的屋顶、水面、农田、林地地面或沟渠
-    未知: 影像模糊或证据冲突，且遮挡两端都看不到路面、走向也无从推断；单纯被树荫遮挡不属于未知
-  cautions:
-  - 优先用 RGB 地面证据，不能把专题图的颜色或程序给出的中心位置直接当成道路
-  - 广场、停车场、场院不因缺少线状道路而判不可行驶
-  - 树冠或阴影遮住地面时必须作判断：查看遮挡两端、缝隙中露出的路面，以及两侧建筑、车道入口、树列排成的走向；能接续或走向合理就选 道路
-  - 树荫遮挡本身不是证据不足；两端清楚接续时 area_type_confidence 选 高，只有一端可见或靠走向推断时选 中
-  - 只有遮挡两端都看不到任何路面、走向也无从推断时才选 未知
-  - 语义图全绿、中心位置落在树冠上都不能证明地面不可通行
 confidence:
   levels:
     高: 本项关键证据清楚，结论由可见事实支持
     中: 存在局部缺失或遮挡（包括树荫遮挡但可推断路带），不影响本项主要判断
     低: 本项关键证据不足、冲突或只能猜测
-  fields: 每个判定字段单独输出置信度，命名为 <字段名>_confidence（如 area_type_confidence、road_geometry_confidence）；data_status 的置信度沿用 data_confidence
+  fields: 每个判定字段单独输出置信度，命名为 <字段名>_confidence（如 road_geometry_confidence）；data_status 的置信度沿用 data_confidence
 uncertainty: 每项单独说明无法确认的部分；没有则写“无”
-drivable_result:
-  道路: true
-  铺装广场: true
-  停车场或硬化场院: true
-  未铺装便道或压实土场: true
-  不可通行: false
-  未知: null
 data:
   object: 语义图的可判读性及 RGB 对照是否可靠
   status:
@@ -46,7 +20,7 @@ data:
     不确定: 无法确定异常是否影响判读
   distinction: 能看清道路被错分为其它类别时，应评估这种语义结构损失，不能仅因错分就判数据不可用
 degradation:
-  scope: 只看语义图结构和 RGB 路带；area_type 为 未知 或 不可通行 时也照常判断下列各项
+  scope: 只看语义图结构和 RGB 路带
   shade: 路带被树荫遮挡时，按遮挡两端和走向推断路带位置后照常判断下列各项；遮挡本身不能作为选 不确定 的理由
   comparison: 在 road_comparisons 写清路带位置及 RGB 依据，再核对同位置标签。无数据或错位导致关键对照无法完成、且其余位置不足以支持判断时，verdict 选证据不足；深灰缺失区域不计作其它类别覆盖。
   dominant_class:
@@ -91,7 +65,7 @@ degradation:
     不适用: 已确认不存在可定义沿路方向的线状道路；不能用来代替看不清
     不确定: 缺少两处可比较的语义结构；连续绿色或同样缺少道路标签本身不能证明重复
 consistency_checks:
-  object: 对低置信度处理后的有效值检查；未知或不确定不构成确定冲突。命中时仅将 invalidate 中的字段改为不确定（area_type 用未知），其它字段继续判定；consistency_check 及 consistency_failures
+  object: 对低置信度处理后的有效值检查；未知或不确定不构成确定冲突。命中时仅将 invalidate 中的字段改为不确定，其它字段继续判定；consistency_check 及 consistency_failures
     仅记录检查状态和冲突。
   rules:
   - when:
@@ -114,18 +88,8 @@ consistency_checks:
     - road_geometry
     - longitudinal_structure
     reason: incompatible_longitudinal_applicability
-  - when:
-      area_type:
-      - 道路
-      road_geometry:
-      - 不适用
-    invalidate:
-    - road_geometry
-    - longitudinal_structure
-    reason: road_geometry_not_applicable_to_road
 preprocess:
-- area_type_confidence=低 时，area_type 仅视为 未知，不再应用其它字段的替换规则
-- 除 area_type、data_status 及仅记录字段外，支持不确定选项的判定字段在 <字段名>_confidence=低 时视为 不确定；其余字段照常参与判定
+- 除 data_status 及仅记录字段外，支持不确定选项的判定字段在 <字段名>_confidence=低 时视为 不确定；其余字段照常参与判定
 - data_status 与 data_confidence 不做替换，由 degradation_decision 的数据质量前置规则处理
 degradation_decision:
 - when:

@@ -5,6 +5,7 @@ python -m agent.map_preprocess.run_block_features --manifest output/.../<task_id
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 import sys
 
@@ -12,7 +13,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from agent.map_preprocess.config import load_config
-from agent.map_preprocess.global_config import GlobalPreprocessConfig
+from agent.map_preprocess.global_config import ANALYSIS_MODES, GlobalPreprocessConfig
 from agent.map_preprocess.io import load_manifest, resolve_path
 
 
@@ -21,6 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--manifest', type=Path, required=True)
     parser.add_argument('--dsm', type=Path, help='可选：给定时重新检查并使用该 DSM；省略时沿用 manifest 记录的 DSM（没有则只判语义）')
     parser.add_argument('--config', type=Path, help='global_blocks 配置；省略时沿用 manifest 记录的 Node 1-4 配置，Node 5 参数取当前默认值')
+    parser.add_argument("--analysis", choices=ANALYSIS_MODES, help="退化分析模式，省略时沿用配置（默认 auto）")
     args = parser.parse_args(argv)
     try:
         if args.config:
@@ -31,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
             # manifest 只沿用 Node 1-4 的配置；Node 5 参数（feature_*）一律取当前默认值，
             # 避免旧 manifest 里过期或已删除的指标参数覆盖新定义。
             config = GlobalPreprocessConfig.from_recorded(load_manifest(args.manifest)['config'], keep_features=False)
+        if args.analysis is not None:
+            config = replace(config, analysis=args.analysis)
         import logging
         logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
         from agent.map_preprocess.nodes.block_features import run_block_features

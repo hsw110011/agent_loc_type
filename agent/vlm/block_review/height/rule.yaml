@@ -2,36 +2,15 @@
 # when 的不同字段为 AND，同一字段列表为 OR；degradation_decision 首条命中决定最终结论，一致性约束同时检查。
 # candidate_reasons 是候选；matched_reasons 仅记录最终确认的退化原因。
 review_type: height
-schema_version: 11
+schema_version: 12
 scale: 根据本次图像说明的实际覆盖宽高，将图中相对距离换算为米；以图像说明给出的中心位置为观察中心，不默认图像正中
-drivable:
-  object: 区域中心约 10 m 内与道路方向相符的地面，中心位置允许有小幅偏移
-  area_types:
-    道路: 线状道路、路口、桥面、土路；被遮挡但有可靠两端延续的道路
-    铺装广场: 铺装广场
-    停车场或硬化场院: 停车场、硬化场院、厂区空地
-    未铺装便道或压实土场: 施工便道、车辙、压实土场
-    不可通行: RGB 有明确正证据，能确认中心约 10 m 内及沿线为不可行驶地面，例如可辨认的屋顶、水面、农田、林地地面或沟渠
-    未知: 遮挡、模糊或证据冲突，无法确认地面类型
-  cautions:
-  - 优先用 RGB 地面证据，不能把专题图的颜色直接当成道路
-  - 广场、停车场、场院不因缺少线状道路而判不可行驶
-  - 树冠或阴影遮住地面时，检查中心附近及遮挡两端是否有可可靠接续的路面；能接续可判道路，无法确认则选 未知
-  - 看不到路面、语义图全绿、中心位置落在树冠上，都不能证明地面不可通行；仍可能有遮挡道路时选 未知
 confidence:
   levels:
     高: 本项关键证据清楚，结论由可见事实支持
     中: 存在局部缺失或遮挡，但不影响本项主要判断
     低: 本项关键证据不足、冲突或只能猜测
-  fields: 每个判定字段单独输出置信度，命名为 <字段名>_confidence（如 area_type_confidence、road_geometry_confidence）；data_status 的置信度沿用 data_confidence
+  fields: 每个判定字段单独输出置信度，命名为 <字段名>_confidence（如 road_geometry_confidence）；data_status 的置信度沿用 data_confidence
 uncertainty: 每项单独说明无法确认的部分；没有则写“无”
-drivable_result:
-  道路: true
-  铺装广场: true
-  停车场或硬化场院: true
-  未铺装便道或压实土场: true
-  不可通行: false
-  未知: null
 data:
   object: 相对高度图是否足以判断区域内的高度结构
   status:
@@ -110,7 +89,7 @@ degradation:
     不适用: 已确认不存在可定义沿路方向的线状道路；不能用来代替看不清
     不确定: 沿路关键位置缺失、遮挡或证据不足，无法确认是否重复
 consistency_checks:
-  object: 对低置信度处理后的有效值检查；未知或不确定不构成确定冲突。命中时仅将 invalidate 中的字段改为不确定（area_type 用未知），其它字段继续判定；consistency_check 及 consistency_failures
+  object: 对低置信度处理后的有效值检查；未知或不确定不构成确定冲突。命中时仅将 invalidate 中的字段改为不确定，其它字段继续判定；consistency_check 及 consistency_failures
     仅记录检查状态和冲突。
   rules:
   - when:
@@ -134,15 +113,6 @@ consistency_checks:
     - longitudinal_structure
     reason: incompatible_longitudinal_applicability
   - when:
-      area_type:
-      - 道路
-      road_geometry:
-      - 不适用
-    invalidate:
-    - road_geometry
-    - longitudinal_structure
-    reason: road_geometry_not_applicable_to_road
-  - when:
       raised_structure:
       - 无明显高出结构
       height_distinctiveness:
@@ -152,8 +122,7 @@ consistency_checks:
     - height_distinctiveness
     reason: incompatible_raised_structure
 preprocess:
-- area_type_confidence=低 时，area_type 仅视为 未知，不再应用其它字段的替换规则
-- 除 area_type、data_status 及仅记录字段外，支持不确定选项的判定字段在 <字段名>_confidence=低 时视为 不确定；其余字段照常参与判定
+- 除 data_status 及仅记录字段外，支持不确定选项的判定字段在 <字段名>_confidence=低 时视为 不确定；其余字段照常参与判定
 - data_status 与 data_confidence 不做替换，由 degradation_decision 的数据质量前置规则处理
 degradation_decision:
 - when:
@@ -168,12 +137,6 @@ degradation_decision:
     - 低
   result: null
   reason: uncertain_data_quality
-  degradation_type: 未知
-- when:
-    area_type:
-    - 不可通行
-  result: null
-  reason: not_drivable
   degradation_type: 未知
 - when:
     raised_structure:

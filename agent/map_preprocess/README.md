@@ -38,7 +38,7 @@ CLI 标准输出最后一行为 manifest 的绝对路径（`state/manifest.json`
 | `conclusion` | `degraded`：Node 8 产出了融合区域；`no_degradation`：Node 5-9 全部跑完（或按上面的条件提前结束），所有块都判断成功且没有确认的退化；`incomplete`：没有融合区域，但有节点未运行 / 被跳过 / dry_run、VLM 请求失败（Node 6、Node 9）或无法确认、已确认退化却未融合——不能当作无退化。Node 7 请求失败时基准保留进入融合，不算不完整 |
 | `complete` | `issues` 为空时为 true；`degraded` 也可能为 false（例如部分区域推荐失败、其他块未判断） |
 | `message` | 一句中文结论，同时写入日志和 CLI 输出 |
-| `counts` | 块数、候选块、复核块、确认退化块、不退化块、删除的不可行驶块、退化区域、推荐区域、需人工复核区域 |
+| `counts` | 块数、候选块、复核块、确认退化块、不退化块、历史兼容的删除块数（新结果为 0）、退化区域、推荐区域 |
 | `method_counts` | Node 9 各定位方式的区域数 |
 | `early_exit` | 提前结束时为 `{after, stage, reason, label}`（`reason` 为 `no_candidates` 或 `no_confirmed_degradation`），否则为 null；提前结束后，之后的节点不算未运行 |
 | `issues` | 每项含 `stage`、`kind`（`stage_not_run`、`no_blocks`、`no_data`、`request_failed`、`unverified`、`invalid_patch`、`not_fused`）、中文 `label`、`count`、`ids`。数据缺失另附 `reasons_by_block` |
@@ -94,10 +94,10 @@ bash agent/run_agent.sh --image input_geo_img/kitti_0930_0033_dom.tif \
 | 1 | `load_image_and_resolution` | 读原图尺寸与地理信息，算 m/px，划 3×3 归属区域；有 DSM 时检查与 RGB 对齐 | `image_path`、`dsm_path`、`config` | `image`、`tiles`、`resolution_m_per_px`、`resolution_source` | — | — |
 | 1b | `classify_scene_type`（`segmenter: magroad_scene`） | 本地 Qwen 只看整图缩略图判断结构化/非结构化，程序映射到 MaGRoad 权重（非结构化 `magroad_wild_checkpoint`，结构化 `magroad_urban_checkpoint`）；失败/不确定/低置信度用 `scene_type_fallback`；结束后关闭 VLM 服务 | `image_path`、`image`、`resolution_m_per_px` | `scene_type`（场景、来源、选用权重） | `scene_type.json`（输入、原始输出、决策） | `00_scene_type_inputs/` |
 | 2 | `extract_road_graph` | 整图道路图：默认用 Node 1b 选出的 MaGRoad 权重（按输入哈希 + 权重/阈值缓存） | `image_path`、`image`、`resolution_m_per_px` | `raw_road_graph_path`、`road_graph_cache`、`input_sha256` | `raw_road_graph.json` | — |
-| 3 | `clean_road_graph` | 掩码拓扑（MaGRoad 概率 + 语义分割生成路网，见“Node 3：掩码拓扑”）、外部约束、可选分支复核；`road_topo_enabled=false` 时回退旧的逐步清洗 | `fused_road_graph_path`（无补路时 `raw_road_graph_path`）、`image`、`resolution_m_per_px` | `clean_road_graph_path`、`clean_graph_overview_path` | `clean_road_graph.json`（保留边、删除边及原因、过滤统计） | `01_road_cleaning.png`；启用复核时 `branch_review_input.png` |
-| 4 | `build_blocks_and_groups` | 沿每条边按 71.25 m 弧长步长布 75 m 块→保留道路覆盖的几何去重→块邻接与分组，写 manifest | `clean_road_graph_path`、`image`、`tiles`、`resolution_m_per_px` 等 | `manifest_path` | `manifest.json`（nodes/edges/blocks/groups/dedup_stats/files） | `02_road_topology.png`、`03_blocks_initial.png`、`04_blocks_final.png` |
+| 3 | `clean_road_graph` | 掩码拓扑（仅 MaGRoad 概率生成路网，见“Node 3：掩码拓扑”）、外部约束、可选分支复核；`road_topo_enabled=false` 时回退旧的逐步清洗 | `fused_road_graph_path`（无补路时 `raw_road_graph_path`）、`image`、`resolution_m_per_px` | `clean_road_graph_path`、`clean_graph_overview_path` | `clean_road_graph.json`（保留边、删除边及原因、过滤统计） | `01_road_cleaning.png`；启用复核时 `branch_review_input.png` |
+| 4 | `build_blocks_and_groups` | 沿每条边按 48.75 m 弧长步长布 75 m 块→保留道路覆盖的几何去重→块邻接与分组，写 manifest | `clean_road_graph_path`、`image`、`tiles`、`resolution_m_per_px` 等 | `manifest_path` | `manifest.json`（nodes/edges/blocks/groups/dedup_stats/files） | `02_road_topology.png`、`03_blocks_initial.png`、`04_blocks_final.png` |
 | 5 | `compute_block_features`（`block_features_enabled`） | 计算块级语义及可选相对路面高度统计，按阈值筛选候选块并记录缺失数据 | `manifest_path` | `block_features`（摘要、可用和缺失数据） | `blocks[].features`、`blocks[].review_types_available`、`block_features.json` | `05_blocks_degraded.png`、`06_degraded_block_sheets/`、`07_per_block_images/` |
-| 6 | `vlm_review_blocks`（`vlm_review_enabled`，需 Node 5） | 本地 Qwen 独立复核候选块命中的语义或高程支路，确认不可行驶的块删除 | `manifest_path` | `vlm_review`（删除、失败、未确认块） | `blocks[].vlm_review`、`degraded_scenes.json`、`vlm_review.json`、`vlm_review/`、`manifest_before_vlm_review.json` | `09_vlm_review.png`、`10_vlm_review_inputs/` |
+| 6 | `vlm_review_blocks`（`vlm_review_enabled`，需 Node 5） | 本地 Qwen 独立复核候选块命中的语义或高程支路，按退化证据保留候选结论 | `manifest_path` | `vlm_review`（失败、未确认块） | `blocks[].vlm_review`、`degraded_scenes.json`、`vlm_review.json`、`vlm_review/`、`manifest_before_vlm_review.json` | `09_vlm_review.png`、`10_vlm_review_inputs/` |
 | 7 | `vlm_expand_blocks`（`vlm_expansion_enabled`，需 Node 6） | 对 Node 6 确认退化的支路，中心不变，扩展到 100 m（`vlm_expansion_sizes_m`）判断退化是否延续，程序计算连续确认的最大已测试尺寸；semantic 与 height 独立记录，不改块和 Node 6 结论 | `manifest_path`、`vlm_review` | `vlm_expansion`（摘要） | `degradation_extents.json`、`vlm_expansion.json`、`vlm_expansion/`；`extensions.vlm_expansion` | `11_vlm_expansion.png`、`12_vlm_expansion_inputs/` |
 | 8 | `fuse_degraded_patches`（`degradation_fusion_enabled`，需 Node 7） | 把 Node 7 每条完成支路的最大确认窗口作为 Patch，按正面积重叠求连通分组并计算真实并集；纯几何，不调用 VLM，不改前序结论 | `manifest_path`、`vlm_expansion` | `degradation_fusion`（摘要） | `degradation_regions.json`；`extensions.degradation_fusion` | `13_degradation_fusion.png` |
 | 9 | `recommend_localization`（`vlm_localization_enabled`，需 Node 8） | 本地 Qwen 逐融合区域推荐一种辅助定位方式（gps / lidar_inertial_slam / wheel_imu_odometry）；模型不接触坐标，bbox 等由程序按区域 ID 补回；不改 Node 8 结果 | `manifest_path`、`degradation_fusion` | `localization_recommendation`（逐区域摘要） | `localization_recommendations.json`、`localization_recommendation/`；`extensions.localization_recommendation` | `14_localization_recommendation.png`、`15_localization_inputs/` |
@@ -135,12 +135,12 @@ output/map_preprocess/global_blocks/<image_name>/<task_id>/
     ├── 07_per_block_images/<block_id>/{rgb,semantic_color,semantic_overlay,dsm_raw,height,height_bands}.png
     ├── 06_degraded_block_sheets/ # 自动生成的退化块拼图
     ├── 08_contact_sheets/         # 手动抽块拼图（feature_contact_sheet）默认输出
-    ├── 09_vlm_review.png          # Node 6：退化场景（绿）/不退化（白虚框）/不可行驶已删除（红叉）/未确认（黄）
+    ├── 09_vlm_review.png          # Node 6：退化场景（绿）/不退化（白虚框）/未确认（黄）
     ├── 10_vlm_review_inputs/<block_id>/{local_rgb,local_semantic,context_semantic}.png（semantic）或 {context_rgb,local_rgb,local_dsm}.png（height）+ <type>_input.json + <type>_metadata.json  # 输入图、精简说明、本地元数据
     ├── 11_vlm_expansion.png       # Node 7：各支路最大确认尺寸（semantic 绿、height 橙，粗框=已扩展，黄=基准不完整）
     ├── 12_vlm_expansion_inputs/<block_id>/<type>/{rgb,<type>}.png + <type>_input.json + <type>_metadata.json  # 同范围双图及档位框
     ├── 13_degradation_fusion.png  # Node 8：并集按类型半透明填充（红=degradation，蓝=longitudinal_degradation），青框=来源 Patch，黄框=外接矩形
-    ├── 14_localization_recommendation.png  # Node 9：按推荐方式着色（绿=gps，蓝=lidar_inertial_slam，橙=wheel_imu_odometry），黄框=需人工复核，灰=失败
+    ├── 14_localization_recommendation.png  # Node 9：按推荐方式着色（绿=gps，蓝=lidar_inertial_slam，橙=wheel_imu_odometry），灰=失败
     └── 15_localization_inputs/<region_id>/rgb.png + input.json + metadata.json  # Node 9 送入 VLM 的带边界 RGB 及本地元数据
 ```
 
@@ -183,10 +183,10 @@ SHA256、分辨率、推理配置、完整 checkpoint SHA256（或 dummy 图文�
 才启用缓存；调用者需把实现及参数版本编码进 key，否则默认不缓存。
 
 Node 3 掩码拓扑（`road_topo.run_arrays`：R/S 融合、骨架化、遮挡补全、面状区域、剪枝等）也缓存在 `<cache_dir>/road_topo/`（`nodes/road_topo_cache.py`）。
-键为 MaGRoad 缓存键 + 整图语义缓存键 + 图像尺寸/分辨率 + 配置的 `road_topo` 一节 + `utils/road_topo.py` 源码哈希；
+键为 MaGRoad 缓存键 + 图像尺寸/分辨率 + 配置的 `road_topo` 一节 + `utils/road_topo.py` 源码哈希；
 同一输入再次运行直接读出路网、每步统计和 `01b_road_topo/` 图（河西十几分钟 → 秒级），之后的清洗、语义路线和布块照常计算。
 改 Node 4 及之后的参数仍命中；改 `road_topo` 参数或代码自动失效；修改 run_arrays 之前的输入准备要递增 `road_topo_cache.CACHE_VERSION`。
-关闭 `cache_enabled`、Node 2 未缓存或注入的语义模型没有身份时不缓存。`filter_stats.road_topo.cache_hit` 记录是否命中，命中时 `steps` 的耗时为首次计算时的值。
+关闭 `cache_enabled`、Node 2 未缓存时不缓存。`filter_stats.road_topo.cache_hit` 记录是否命中，命中时 `steps` 的耗时为首次计算时的值。
 
 离线模式显式设置 `segmenter: dummy`。`dummy_graph_path` 可指向上述统一图 JSON；
 省略时生成一条带 degree-2 中点的合成直路，不代表真实道路识别。
@@ -207,7 +207,7 @@ Node 3 掩码拓扑（`road_topo.run_arrays`：R/S 融合、骨架化、遮挡�
 | `road_skeleton_fill_min_length_m` | 0（两份 YAML 为 40） | 概率骨架补漏的最短路段（米）；0 关闭，需要语义路线的整图语义和模型概率图 |
 | `road_paved_ring_min_road` / `road_paved_ring_max_perimeter_m` | 0（两份 YAML 为 0.6）/ 300 | 内部路面占比达到前者、周长不超过后者（米）的环按宽路口网格或分隔带双线处理；需要语义路线；前者为 0 关闭 |
 | `road_duplicate_prob` / `road_duplicate_min_support` | 0.18 / 0.6 | 贯通路网内的重复路去弱：两条边首尾相同时，沿线模型道路概率达到前者的长度比例低于后者的边删除，最强的一条始终保留；没有概率图的分割器跳过；后者为 0 关闭 |
-| `road_semantic_route_enabled` / `road_semantic_route_corridor_m` / `road_semantic_route_node_snap_m` | false / 15 / 8 | 语义路线开关、路线离原线的上限、路口吸附半径（米）；两份流程 YAML 开启，上限为 25 m |
+| `road_semantic_route_enabled` / `road_semantic_route_corridor_m` / `road_semantic_route_node_snap_m` | false / 15 / 8 | 语义路线开关、路线离原线的上限、路口吸附半径（米）；默认关闭，上限为 25 m |
 | `road_smooth_sigma_m` | 6 | 曲率平滑的高斯 sigma（米），90° 转角磨成半径约 1.6×sigma 的圆弧；0 关闭；两份流程 YAML 为 10 |
 | `score_length_scale_m` | 100 | 长度分数 `min(1, length/scale)` |
 | `edge_score_weights` | length .25 / confidence .4 / straightness .2 / connectivity .15 | 非负权重，按权重和归一化 |
@@ -239,7 +239,7 @@ route 必须整条落在缓冲区；ROI 以 <=0.5px 采样检查，每个样点�
 
 | 参数 | 默认 | 含义 |
 | --- | --- | --- |
-| `block_size_m` / `block_overlap_ratio` | 75 / .05 | 方块物理边长和沿路名义重叠；默认步长 71.25 m |
+| `block_size_m` / `block_overlap_ratio` | 75 / .35 | 方块物理边长和沿路名义重叠；默认步长 48.75 m |
 | `blocks_per_group` / `group_overlap_blocks` | 3 / 1 | 连续组大小与共享块数；末组保留剩余实际块 |
 | `long_edge_strategy` | split_continuous | 连续覆盖；sparse3 只取贴起点/中点/贴终点三块并 warning |
 | `context_size_m` | 300 | 上下文方窗大小，null 关闭；只记录几何，不裁图 |
@@ -272,7 +272,7 @@ tangent_angle_rad,node_ids,tile_id,predecessor_ids,successor_ids,features,contex
 栅格对齐误差不超过半像素。有效区域与 padding 针对 crop_bbox，所有路径均相对项目根。
 
 初始覆盖指标按沿边弧长上的 `[center−size/2,center+size/2]` 区间并集计算，作为方块
-真实覆盖的保守下界。沿图像横轴的直路上，相邻框横向重叠 3.75 m；纵向直路同理。
+真实覆盖的保守下界。沿图像横轴的直路上，相邻框横向重叠 26.25 m；纵向直路同理。
 斜路和弯道上的框仍对齐原图坐标轴，实际二维重叠随方向和曲率变化。连续布块覆盖率为 1，
 长边 sparse3 则报告覆盖空洞。
 
@@ -331,15 +331,14 @@ dedup_candidate_spacing_m: 10  # greedy 候选间距
 road_sample_spacing_m: 1
 min_road_coverage: 0.995    # greedy 停止条件
 block_size_m: 75
-block_overlap_ratio: 0.05
+block_overlap_ratio: 0.35
 ```
 
-`walk` 复用初始框的中心和尺寸。一个框只有在与它各自重叠至少 50% 面积的保留框共同覆盖
-其全部精确道路区间时才会删除，路尾与支路上短于采样间距的独占区间也保留。逐个检查删除，
+`walk` 复用初始框的中心和尺寸。一个框只有在保留框能共同覆盖它的全部精确道路区间时才会删除。用于接手覆盖的保留框须与待删框重叠至少 75% 面积，路口同样适用。路尾与支路上短于采样间距的独占区间也保留。逐个检查删除，
 优先保留长边上的框，同边优先保留靠前的框。`dedup_min_gain_m` 仅保留旧配置读取兼容性。
 
 `greedy` 使用独立候选做全局贪心覆盖。启用剪除时，按最小独占采样长度逐个删除冗余框，
-要求该长度低于 `dedup_prune_max_loss_m` 且删后采样覆盖率达到 `min_road_coverage`。
+要求存在至少 75% 面积重叠的保留框、独占采样长度低于 `dedup_prune_max_loss_m`，且删后采样覆盖率达到 `min_road_coverage`。
 两种模式剪除的数量都记入 `dedup_stats.pruned_redundant_blocks`。
 
 开启去重时 Node 4 输出 `visualization/03_blocks_initial.png`（去重前沿每条边独立布块）与
@@ -437,6 +436,8 @@ Node 4（未重新推理模型），新产物为
 
 ## Node 3：掩码拓扑（`utils/road_topo.py`）
 
+默认从 MaGRoad 概率直接构建拓扑。跳过语义融合及依赖语义的遮挡补路，保留几何拓扑规则。
+
 `pipeline.yaml` 开启 `road_topo_enabled`，路网直接由掩码生成，不再使用 MaGRoad 的稀疏图，也不再运行下面几节的旧清洗（语义路线、骨架补漏、贯通路网、`min_edge_score` 过滤都不生效）。全部参数在 `pipeline.yaml` 的 `road_topo` 一节（米制），每一步可单独开关。
 
 1. **输入**：`road_probability.npy` 线性上采样到原图后按 `road_thresh`（0.18）二值化得到 R；整图语义的道路类得到 S。需要真实的道路提取模型，dummy 分割器没有概率图，开启时报错。
@@ -488,7 +489,7 @@ Node 4（未重新推理模型），新产物为
    只留总长最大的连通分量（reason=`disconnected_road`）；贴图边路端到路口短于 `road_close_node_dist_m` 的短边删除（reason=`short_border_stub`）。评分过滤后再执行一次，这一次不合并路口。
    **路面环**（`collapse_paved_rings`，`filter_stats.paved_rings`，语义路线后再查一次）：贯通路网定稿后，环内部语义道路占比达到 `road_paved_ring_min_road` 时是宽路口网格或分隔带双线，不是街区（河西路口网格 0.8~1，KITTI 街区最高 0.42）：紧凑度 4πA/P² 不低于 0.4 的环收成一个路口节点，细长的环和两条边的环去掉一条边（reason=`paved_ring`）。两端都是路口、长度不足 40 m、中点周围 25 m 内路面占比达到 80% 的短边，两端合并到中点（`merge_wide_junctions`，reason=`wide_junction_merge`；河西 0.91 以上，KITTI 最高 0.52）。
    **分岔处建节点**（`split_shared_stretches`，`filter_stats.split_shared`）：从同一节点出发的两条边相距不超过 4 m 走了 `road_shared_min_length_m` 以上时，在真实分岔处打断置信度高的边并建节点，另一条从这里接入，重合段只留一条。
-   **语义路线**（`road_semantic_route_enabled`，两份流程 YAML 开启，`filter_stats.semantic_route`）：贯通路网定稿后，先取整图语义（流程语义模型，默认 SegEarth-OV3，按输入哈希缓存），路线改走 road 类中线，连接关系不变。路口吸附到路面中心（半径 `road_semantic_route_node_snap_m`），路端不动；每条边在原线两侧 `road_semantic_route_corridor_m` 的走廊内求最小代价路径，没有 road 类的路段（树荫等）被拉回原线，建筑代价最高；绕路超过 1.35 倍或首尾相同的重复边保持原形。 路线代价按当地半宽归一（30 m 窗口内离路边的最大距离），宽路窄路中线的吸引力一样；宽路上路口吸附半径随半宽放大，最多 15 m。路线走完后再做一次分岔建节点（`filter_stats.split_shared_after_route`），分岔点周围 25 m 内路面占比达到 80% 的宽路口除外。语义路线只改路线形状，不增删连接。有模型概率图时（`road_probability.npy`）路线优先沿概率脊线走（概率 >= 0.3 处按当地最大概率归一），概率弱或断开处用语义 road 类补，路口也优先吸附到概率脊线，`filter_stats.semantic_route.on_probability_after` 记录线落在概率带内的比例。
+   **语义路线**（`road_semantic_route_enabled`，默认关闭，`filter_stats.semantic_route`）：贯通路网定稿后，先取整图语义（流程语义模型，默认 SegEarth-OV3，按输入哈希缓存），路线改走 road 类中线，连接关系不变。路口吸附到路面中心（半径 `road_semantic_route_node_snap_m`），路端不动；每条边在原线两侧 `road_semantic_route_corridor_m` 的走廊内求最小代价路径，没有 road 类的路段（树荫等）被拉回原线，建筑代价最高；绕路超过 1.35 倍或首尾相同的重复边保持原形。 路线代价按当地半宽归一（30 m 窗口内离路边的最大距离），宽路窄路中线的吸引力一样；宽路上路口吸附半径随半宽放大，最多 15 m。路线走完后再做一次分岔建节点（`filter_stats.split_shared_after_route`），分岔点周围 25 m 内路面占比达到 80% 的宽路口除外。语义路线只改路线形状，不增删连接。有模型概率图时（`road_probability.npy`）路线优先沿概率脊线走（概率 >= 0.3 处按当地最大概率归一），概率弱或断开处用语义 road 类补，路口也优先吸附到概率脊线，`filter_stats.semantic_route.on_probability_after` 记录线落在概率带内的比例。
    **骨架补漏**（`road_skeleton.fill_from_skeleton`，`road_skeleton_fill_min_length_m`，`filter_stats.skeleton_fill`）：贯通路网定稿后，MaGRoad 仍是主路网，只把概率掩码（概率 >= 0.3，语义 road 类只填概率带 12 m 内的断口）骨架上离路网超过 18 m、长度达到该值、概率强（沿线 70% 以上）、沿线建筑不超过 30%、两端离路网不超过 25 m 的路段补回路网。
    **节点路数上限**（`split_crowded_junctions`，`road_max_node_degree`，`road_max_shared_gap_m`，`filter_stats.crowded_junctions`）：平滑前，短于间距的边先合并，超过上限的路口拆成相距该间距的两个节点，最直的一对路作干路，其余支路按朝向分到两侧。
 5. **曲率平滑**（`smooth_roads`）：拓扑定稿后才做。每条边去掉小于 sigma/6 的抖动和折返毛刺（单顶点转角超过 120° 且短臂不超过 3×sigma，更长的 V 形只做圆角）。
@@ -522,14 +523,16 @@ bash agent/run_agent.sh --image input_geo_img/kitti_0930_0033_dom.tif \
 
 ## Node 5：块级语义与 DSM 高程指标（compute_block_features）
 
-当前按 DSM 是否可用自动选择退化分析分支。手动选择语义、高程或两项分析的命令见根目录 [拟新增的分析模式](../../README.md#语义与高程分析模式拟新增)。
+默认按 DSM 是否可用自动选择退化分析分支。手动选择语义、高程或两项分析的命令见根目录 [分析模式](../../README.md#语义与高程分析模式)。
 
-输入两种情况，由是否提供 DSM 决定：
+`semantic` 跳过 DSM；`height` 和 `both` 要求 DSM。Node 5 摘要记录 `analysis` 和实际运行的 `analysis_branches`。单独重跑 Node 5 也支持 `--analysis`，省略时沿用任务或指定配置的模式。
+
+默认 `auto` 有以下两种输入情况：
 
 | 输入 | 道路拓扑 / 块 | Node 6 语义支路 | Node 6 高程支路 |
 | --- | --- | --- | --- |
 | 只有 RGB | RGB（MaGRoad） | 命中语义阈值才送审 | 无 DSM |
-| RGB + DSM（同名配对或 `--dsm`） | RGB（MaGRoad） | 只记录语义占比 | 命中高程阈值才送审 |
+| RGB + DSM（同名配对或 `--dsm`） | RGB（MaGRoad） | 只记录语义占比 | 命中高程阈值、路面基准无效但有有效 DSM，或道路中心向上阶跃时送审 |
 
 ```bash
 bash agent/run_agent.sh --image input_geo_img/miluo_dom.tif \
@@ -541,9 +544,9 @@ DSM 不参与拓扑，Node 1 只检查它能否与 RGB 对齐并写入 manifest 
 - `geo`：两者都有 CRS/地理变换，CRS 与分辨率可以不同；地理范围必须有重叠；
 - `pixel`：两者都没有地理信息时按像素对应，尺寸必须一致；一方有、一方没有则报错。
 
-Node 5 按块的 RGB 像素范围换算地理范围，把 DSM 双线性重投影到块网格（RGB 网格按
+Node 5 按块的 RGB 像素范围换算地理范围，把 DSM 用最近邻对齐到块网格（RGB 网格按
 `block_grid_factor`≈DSM 一个像元覆盖的 RGB 像元数下采样，不把粗 DSM 插值到 RGB 原分辨率）。
-DSM 的 nodata、非有限值及绝对值 > 1e4 的值记为无效。语义标签最近邻缩放到同一网格后参与可靠性检查。
+DSM 缺值及掩码位置保持无效，Node 5 高程图用黑色显示。语义标签最近邻缩放到同一网格后参与可靠性检查。
 
 只处理 manifest 中每块方块在原图内的部分（读取 `valid_global_bbox`），超出原图的部分直接裁掉、不补边；
 300m `context` 不参与。每块只看自身场景：不与邻块比较、不做全图排名。语义分割全部块→缓存→卸载，
@@ -574,13 +577,13 @@ Python：`run_pipeline(image, config, dsm_path=..., semantic_segmenter=...)` 或
 | `manifest.json` → `blocks[].feature_vis` | 该块图片路径；关闭可视化时为 null |
 | `visualization/07_per_block_images/<block_id>/` | `rgb`、`semantic_color`、`semantic_overlay`；有 DSM 时再加 `height`、`height_bands` |
 | `visualization/05_blocks_degraded.png` | 全图块上标出退化块（按语义/高度/两者着色） |
-| `visualization/06_degraded_block_sheets/` | 自动分页汇总退化块。每块展示 RGB 原图、语义分割图，有 DSM 时再展示相对路面高度图和高度分段图；最右栏汇总语义比例、高程分段比例和初筛结果 |
+| `visualization/06_degraded_block_sheets/` | 自动分页汇总退化块。每块展示 RGB 原图、语义分割图，有 DSM 时再展示相对路面高度图和高度分段图；最右栏并列显示语义、高程占比与本次运行使用的退化阈值，命中项用红色标出，并列出初筛结论及额外高程复核原因 |
 | `visualization/08_contact_sheets/` | 按需运行拼图工具的输出 |
 | `state/block_features.json` | 摘要：`height_source`、DSM 元数据、整图语义缓存命中、各阈值诊断列表及可评估块、缺失数据和路面基准列表 |
 | `manifest.json` → `blocks[].review_types_available` | 记录可用的专题数据 |
 
-语义不再逐块推理：Node 5 直接从 Node 3 的整图语义（`cache_dir/semantic_whole/`，`mask` 0 road/1 building/2 plant/255 无效 + `confidence`）
-按块的 `valid_global_bbox` 裁剪（`semantic_crop`），与语义路线、Node 6/7 用同一份结果；修改阈值、分段或 DSM 无需重新推理。
+语义不再逐块推理：Node 5 生成或复用整图语义（`cache_dir/semantic_whole/`，`mask` 0 road/1 building/2 plant/255 无效 + `confidence`）
+按块的 `valid_global_bbox` 裁剪（`semantic_crop`），与 Node 6/7 用同一份结果；修改阈值、分段或 DSM 无需重新推理。
 摘要记录 `semantic_source=whole_image`、`semantic_cache_hit`、`semantic_working_size`。`feature_cache_enabled`/`feature_cache_dir` 只为兼容旧配置保留，不再使用。
 图片默认缩到 `feature_vis_max_side=1000`；semantic 图例：road 红、building 蓝、plant 绿、other 品红、
 无效深灰；height 为块内去偏相对高度（0 m → `feature_height_vis_max_m`=15 m，近似 viridis）；
@@ -588,21 +591,21 @@ height_bands 按分段离散着色，与 `height_band_pct` 一致。
 
 ### 指标（`blocks[].features`）
 
-中英文名称与定义统一维护在 `feature_definitions.py`（`METRICS`）。Node 5 只输出指标和规则判定结果，不做可靠性标记。
+中英文名称与定义统一维护在 `feature_definitions.py`（`METRICS`）。Node 5 记录路面高程基准的取样质量、块级指标和规则判定。
 
 | 字段 | 含义 |
 | --- | --- |
 | `class_pct` | 整块有效像元中 road/building/plant/other 占比（%，和为 100）；other 为最高类置信度低于 `feature_min_class_confidence` 的像元；SegEarth-OV3 只输出三类，置信度下限为 0.5，默认配置下 other 恒为 0 |
 | `height_band_pct` | DSM 相对块中心路面高度的分段占比（%，只统计 0 m 及以上），`0-0.5m` / `0.5-2m` / `>2m`；无 DSM 为 null |
 | `height_stats` | `base_ref`/`base_dsm_m`/`base_offset_m`（路面 0 点、来源及离块中心距离）、`below_base_pct`（低于路面不计入）、`terrain_slope_pct`（仅去坡时）、`median_m`、`p95_m`、`max_m`、`nodata_pct`；无 DSM 为 null |
+| `road_reference` | 路面高程基准是否有效、来源、偏移及各次取样诊断；无 DSM 为 null |
 | `degradation` | 退化判定，见下节 |
 
 每块 DSM 以**块中心路面**为 0 点（`utils/block_features.py:dsm_height_features`）：
 
 1. 块中心 `global_xy` 是布块时道路拓扑线上的点（块以它为中心裁剪），但拓扑线可能偏离实际路面（例如落在路边建筑上）。
-   中心像元是 road 且 DSM 有效时，取中心 5 m × 5 m 内有效 road 像元的 DSM 中位数（`base_ref=center_road`）。
-   中心不是有效路面时，取同中心 10 m × 10 m 内有效 road 像元的中位数（`base_ref=expanded_road`），
-   最近入选像元的距离记入 `base_offset_m`。仍无有效 road 时，高程统计为空，不进入高度退化候选。
+   按中心 5、10、20 m 方窗依次找道路样本，每档先查语义道路，再查清洗道路。
+   最近入选像元的距离记入 `base_offset_m`。三档都取不到有效基准时，高程统计为空。
    台阶连通区域也从这些路面像元出发。
 2. 相对高度 = DSM − 0 点，单位米、不缩放，与 DSM 高程基准和所在海拔无关。
 3. 低于路面（< −`feature_below_base_tolerance_m`，0.3 m）的像元按**高度变化是否连续**分两类：
@@ -615,20 +618,23 @@ height_bands 按分段离散着色，与 `height_band_pct` 一致。
 下坡一侧由连续性规则处理（缓坡低于计为地面）；上坡一侧仍按相对高度落入高段。可选 `feature_dsm_detrend: true`（默认关）
 先减去块内拟合的地形平面。
 
+语义道路无法提供有效基准时，Node 5 从 manifest 的 `files.cleaned_road_reference_mask` 读取 Node 3 保存的原图网格二值掩码，在同一档中心方窗内补选有效 DSM 样本。掩码排除遮挡补桥新增像元，补选直接使用掩码与有效 DSM，避免语义错分再次排除采样点。取样成功记录为 `base_ref=cleaned_road`，否则记录基准无效及各次取样的拒绝原因。旧 manifest 若没有该掩码，需从 Node 3 重新生成才能使用后备规则。
+
 ### 退化判定（`features.degradation`）
 
 比较均为严格不等（恰好等于阈值不算退化）：
 
 | 字段 | 条件 |
 | --- | --- |
-| `semantic_degraded` | 仅无 DSM 时判断：道路 < `feature_semantic_max_road_pct`（10%）且 植被 > `feature_semantic_min_plant_pct`（65%），即植被覆盖、几乎无路。有 DSM 时为 null |
+| `semantic_degraded` | 语义分支启用时判断：道路 < `feature_semantic_max_road_pct`（15%）且 植被 > `feature_semantic_min_plant_pct`（65%），即植被覆盖、几乎无路。语义分支关闭时为 null |
 | `height_degraded` | 有 DSM 时任一满足即为 true：① `0-0.5m` 段 > `feature_height_flat_min_pct`（90%），整块几乎和路面一样平；② **阶跃低于**路面的像元 `step_below_pct` > `feature_height_below_max_pct`（70%），如路堤、高架，四周隔着台阶比路低；缓坡低于不算。`>2m`（及 `0.5-2m`）占比大不算退化。无 DSM 为 null |
-| `degraded` | 有 DSM 时取 `height_degraded` 的布尔结果，无 DSM 时取 `semantic_degraded` 的布尔结果，供 Node 5 诊断和可视化 |
+| `degraded` | 任一启用分支命中即为 true，供 Node 5 诊断和可视化 |
 
 同时记录 `height_reasons`（`flat`/`below_road`）、`height_flat_pct`、`height_below_pct`、`semantic_road_pct`/`semantic_plant_pct`。
 `block_features.json` 的 `degraded_blocks`、`semantic_degraded_blocks`、`height_degraded_blocks` 保存阈值标记。
 实际送审块记在 `review_candidate_block_ids`，各块缺失的专题数据记在 `unavailable_review_data`。
-有效 DSM 缺路面参考时，`missing_road_reference_block_ids` 记录块 ID，汇总标记结果不完整。
+路面基准按中心 5、10、20 m 方窗逐档尝试，每档优先语义道路，失败后尝试清洗道路。命中档位记录为 `features.road_reference.window_m`。DSM 读取时排除声明的 NoData、非有限值、常见未声明填充值 -9999 和绝对值超过 10000 m 的高程。每次尝试要求有效道路像元数 ≥ `feature_road_ref_min_samples`（3）、道路像元的有效 DSM 占比 ≥ `feature_road_ref_min_valid_pct`（50%）、有效道路高程 P75−P25 ≤ `feature_road_ref_max_iqr_m`（2 m）。
+各次尝试的样本数、覆盖率、四分位距和拒绝原因写在块的 `features.road_reference`。基准有效时取合格道路像元的中位数，统计 [0, 0.5)、[0.5, 2)、[2, +∞) m 三段（最高段沿用字段名 `>2m`）。基准无效时 `height_stats`、`height_band_pct`、`height_degraded` 留空，块 ID 写入 `invalid_road_reference_block_ids`；块内还有有效 DSM 时，列入 `review_candidate_block_ids` 并直接送高程 VLM。无道路像元但有 DSM 的块另列在 `missing_road_reference_block_ids`。整块 DSM 无有效值时，记录 `dsm_no_data` 并保留为未判断。
 版本 4 起不再输出 `reliability`、`*_unreliable_blocks` 和 `*_dominant`，相关配置 `feature_max_other_pct`、`feature_min_mean_confidence`、
 `feature_max_dsm_nodata_pct`、`feature_max_road_dsm_iqr_m`、`feature_min_class_pct` 已删除（配置里写了会报未知字段）。
 
@@ -637,12 +643,12 @@ height_bands 按分段离散着色，与 `height_band_pct` 一致。
 
 本地 Qwen 独立评估 Node 5 送来的区域。语义侧关注类别占比、道路边界和其它类别侵入道路；
 高程侧关注图示起伏与整体高度区分度，优先高出结构。本阶段不判断雷达实际可见性，也不决定定位方式切换。
-Node 6 按 Node 5 的阈值结果分流，只为命中支路生成输入图并发起请求。整批只有高程候选时，Node 6 不读取整图语义。
+Node 6 为阈值命中的支路和基准无效的高程块生成输入图并发起请求。整批只有高程候选时，Node 6 不读取整图语义。道路拓扑中心高出有效路面基准至少 `feature_step_height_m`，与路面之间不能避开台阶连通，且存在有效 DSM 像元连接时，记录 `height_stats.center_step_above=true` 并额外送高程复核。模型收到遮挡、隧道或下穿入口、建筑占路的核查提示，仍按图像证据判断退化。
 
 | 分流条件 | 系统 | 输入 |
 | --- | --- | --- |
 | `semantic_degraded=true` | `agent/vlm/block_review/semantic/` | 局部 RGB + 局部语义 + 整体语义上下文（三图） |
-| `height_degraded=true` | `agent/vlm/block_review/height/` | 整体 RGB 上下文 + 局部 RGB + 局部 DSM 伪彩色（三图） |
+| `height_degraded=true` 、`height_stats.center_step_above=true` 或基准无效且块内有有效 DSM | `agent/vlm/block_review/height/` | 整体 RGB 上下文 + 局部 RGB + 局部 DSM 伪彩色（三图） |
 
 每套的 prompt 定义任务及图像含义、skill 给观察步骤、rule 给判据和程序映射、schema 定义输出。
 两套系统不相互引用；模型只看到待评估区域，不收到 Node 5 的结论或触发原因。
@@ -696,24 +702,21 @@ Node 6 将退化解释为车端 BEV 与卫星侧地图缺少足够稳定、可�
 
 语义支路先根据 RGB 路面、路缘及遮挡前后的线索确定路带，再对照语义图同位置的道路标签。证据按「位置｜RGB 路带依据及可见性｜同位置语义道路状态」填写，区分可见路面错分和遮挡段道路标签缺失。Node 7 逐档核对新增环带，并结合整个当前窗口判定。
 
-复核记录的 `derived.decision_trace` 保存选中的规则、条件的实际值与允许值、字段修正，以及可行驶性门槛。扩展结果按档保存同样的依据，环带全无数据触发覆盖时记录 `override`。
+复核记录的 `derived.decision_trace` 保存选中的规则、条件的实际值与允许值、字段修正。扩展结果按档保存同样的依据，环带全无数据触发覆盖时记录 `override`。
 
 | 字段 | 内容 |
 | --- | --- |
 | `observations` | 每张输入图一个观察字段，顺序同图片：semantic 为 `rgb`、`semantic`、`context`；height 为 `context`、`rgb`、`height` |
-| `drivable_check` | 证据、`area_type`（含“未知”）及 `area_type_confidence`、uncertainty；可行驶性由 `drivable_result` 从 `area_type` 推导，模型不输出 |
 | `data_check` | 证据、`status`（可用/局部受限/不可用/不确定）、`data_confidence`、uncertainty |
 | `degradation_check` | 证据、dominant_class（仅记录）、dominance、road_boundary、road_intrusion、road_geometry、longitudinal_structure，后五项各带 `<字段名>_confidence`，uncertainty |
 | `height_check` | 证据、`height_comparisons`、relief（仅记录）、raised_structure、height_distinctiveness、road_geometry、longitudinal_structure，后四项各带 `<字段名>_confidence`，uncertainty |
 
 两条支路输出 `longitudinal_comparisons` 和 `verdict.evidence_refs`。明确结论需要引用已记录的对照；纵向退化须引用两个不同沿路位置。专题图全部无数据、模型无法确认数据可用或必要引用缺失时，舍弃该候选，保留原输出和原因供排查。未确认区域不进入退化场景清单。
 
-语义 v10 和高程 v11 将 `verdict.result` 映射为 `derived.degraded` 的 true/false/null，`reason_code` 为 `vlm_verdict`。模型的理由和逐段对照保存在请求记录及确认场景清单中。通行性按 `drivable_result` 独立处理，明确不可通行时删除该块。
+语义 v11 和高程 v12 将 `verdict.result` 映射为 `derived.degraded` 的 true/false/null，`reason_code` 为 `vlm_verdict`。模型的理由和逐段对照保存在请求记录及确认场景清单中。节点保留拓扑块，按退化证据决定是否纳入场景。
 高度 v8 与旧语义输出按有序 `degradation_decision` 计算三态结论；`candidate_reasons` 和 `matched_reasons` 分别记录候选和确认规则。两条支路都保留字段置信度和一致性诊断。
-清单 `area_type` 从所有成功且支持最终通行结论的复核记录的 `effective_area_type` 中选取，包括未判退化的复核类型；类型不一致或无有效类型时填“未知”，不读取低置信度原始类型。
 
 前置检查：数据不可用/不确定（`insufficient_data`）、`data_confidence=低`（`uncertain_data_quality`）给退化未知；
-高程规则还有 `area_type=不可通行`（`not_drivable`，退化不适用）。**语义规则（`decision_ignores_area: true`）的退化结论不看地面类型，可不可通行只决定块的去留**；
 被树荫遮挡的道路要求 VLM 依据遮挡两端、缝隙路面和路旁走向作判断，只有毫无线索时才用未知/不确定。之后按独立有效证据判定；局部矛盾不再作为全局前置阻断。
 没有其它确定结论且存在字段冲突时以 `inconsistent_fields` 记录未知。下表是旧语义记录的规则优先级，语义 v9 由模型结合对照作答：
 
@@ -745,21 +748,19 @@ Rule 只用物理含义描述高出/低处/无数据，颜色对应由图像说�
 高程侧“无明显高出结构”与“高度区分度高”冲突时，仅屏蔽这两个高度字段，沿路结构仍可单独支持纵向退化。
 语义边界消失不等于侵入：只有 RGB 可辨道路且对应位置被其它类别明显覆盖等，才认定侵入。核对的是 RGB 真实路带与同位置标签，明确错分即使不在道路中心附近也算侵入；全为道路类的图可同时“边界消失”和“无侵入”，按单类占优规则判断。
 
-每项置信度是模型自评，未作概率标定。`area_type_confidence=低` 时地面类型视为未知；其它支持“不确定”的判定字段“低”只替换该字段；通用替换明确排除 `area_type`、`data_status` 和仅记录字段，其余证据照常判定；
-`data_confidence=低` 使结构判断未知。高度未知不会覆盖明确的 RGB 道路判断；数据不可用不等于不退化。
+每项置信度是模型自评，未作概率标定。支持“不确定”的判定字段“低”只替换该字段；通用替换明确排除 `data_status` 和仅记录字段，其余证据照常判定；
+`data_confidence=低` 使结构判断未知。数据不可用不等于不退化。
 
 | 合并后的结果 | 处理 |
 | --- | --- |
-| 有明确不可行驶结论，且没有相反的明确道路结论 | 删除块及其相关引用 |
-| 两套明确道路判断互相冲突；或高程复核的道路未知 | 保留，`degraded_scene=null`，不自动删除 |
-| 至少一种退化成立（语义复核不要求确认可行驶，高程复核要求可行驶） | 进入 `degraded_scenes.json`，同时记录其它未确认类型 |
-| 所有请求类型均明确不退化（同上） | 保留，`degraded_scene=false` |
+| 至少一种退化成立 | 进入 `degraded_scenes.json`，同时记录其它未确认类型 |
+| 所有请求类型均明确不退化 | 保留，`degraded_scene=false` |
 | 没有确认退化，且还有未知或失败的类型 | 保留，`degraded_scene=null`，不混入不退化清单 |
 
 `status=uncertain` 表示有有效输出但结论未定，`partial` 表示部分请求失败，全部失败为 `error`。
-`unresolved_review_types` 列出未知或失败的类型，`drivable_conflict` 标记相反道路判断。
+`unresolved_review_types` 列出未知或失败的类型。
 `unverified_block_ids` 收集整体场景结论未知的块。`unresolved_branch_block_ids` 记录支路未确认的块。已确认一种退化的块仍可进入场景清单，下游 `complete` 会标记判断不完整。
-总览图：退化场景绿框、不退化白虚框、不可行驶已删除红叉、未确认黄框。
+总览图：退化场景绿框、不退化白虚框、未确认黄框。
 
 首次运行备份 `state/manifest_before_vlm_review.json`，重跑从备份开始；Node 5 重算前恢复备份。
 历史输出不迁移、不按新 schema 重新解释；新语义复核使用 schema v10，新高程复核使用 v10。
@@ -825,7 +826,7 @@ semantic 和 height 两条支路独立评估、独立记录。本阶段不判断
 Node 7 的多尺寸 Rule 按支路说明怎样把 Node 6 的核心判据应用到扩大后的窗口。语义检查环带内的路带接续、同位置标签及整窗类别布局。高程检查新增结构的清晰度和分布、整窗高程区分度及沿路轮廓。判断时说明环带证据如何影响整个窗口的结论。关键对照无法完成时舍弃当前档，保留上一档已确认范围。
 
 扩展输出 schema v4，高程每档复用三个对照问题。每档输出 `new_ring`（新增环带所见）、`data_check`、结构字段（与 Node 6 schema 完全相同）、`evidence`（一句话说明新增范围出现了什么及对当前窗口的影响）。
-语义和高程各档采用模型的 `verdict`，每个明确结论都要引用该档环带证据 N 和窗口结构证据，最大扩展尺寸由程序根据各档结论计算。地面类型继承 Node 6 的 `effective_area_type`。
+语义和高程各档采用模型的 `verdict`，每个明确结论都要引用该档环带证据 N 和窗口结构证据，最大扩展尺寸由程序根据各档结论计算。
 
 | 当前档 | 处理 |
 | --- | --- |
@@ -844,7 +845,7 @@ Node 7 的多尺寸 Rule 按支路说明怎样把 Node 6 的核心判据应用�
 未评估档位只有 `not_evaluated_reason`，不填造判断和置信度；未知不等于不退化。
 
 块 ID、中心坐标、块尺寸、`blocks[].vlm_review` 和 `degraded_scenes.json` 不变，`manifest.format_version=2`。摘要写入 `extensions.vlm_expansion`，路径写入 `files.degradation_extents`、`files.vlm_expansion`、`files.vlm_expansion_overview`。
-重跑 Node 7 覆盖自身产物；重跑 Node 5/Node 6 从备份恢复 manifest，旧的 Node 7 文件不再被 manifest 引用，需重跑 Node 7。
+Node 5、Node 8 正式重跑会备份自身产物和发布记录，失败时恢复原文件，成功后在阶段结果中记录执行版本。重跑 Node 7 覆盖自身产物；重跑 Node 5/Node 6 从备份恢复 manifest，旧的 Node 7 文件不再被 manifest 引用，需重跑 Node 7。
 
 ### 运行
 
@@ -907,9 +908,9 @@ Prompt 系统在 `agent/vlm/localization_recommendation/`：`node9_localization_
 
 ### 选择规则
 
-P0 同级比较 `lidar_inertial_slam`（lio_slam）和 `wheel_imu_odometry`（wheel_io）。前者需要路侧可能可观测、分布多样且沿路可区分的稳定几何。后者用于几何不足但有连续可通行路带的短段过渡。疑似隧道只采用可见的入口和接续线索，内部结构及通过时间留待验证。
+按 `lidar_inertial_slam`（lio_slam）、`wheel_imu_odometry`（wheel_io）、`gps` 的顺序选择。先判断沿路三维结构疏密（`structure_density`）：结构密集区域（含连续树带、林木植被、建筑与院落交错区等）均可使用 LIO 过渡，树荫、树冠覆盖和遮挡不导致 LIO 降级。仅在结构稀疏或几何单一重复且 LIO 不适用时，才考虑用轮速与 IMU 延续连续可通行路带的位姿，漂移和打滑记入使用限制。
 
-P1 `gps` 只有在两种 P0 都不适用且路线沿途有持续开阔的证据时才考虑。根据近路建筑、树冠和覆盖物判断潜在遮挡及反射风险，实时信号需要在线验证。三种方式均缺少充分依据时给暂定项并标记人工复查。
+GPS 仅在前两项均为 `unsuitable`、路线沿途持续开阔且无明显遮挡或反射风险时选择。没有符合条件的方式时，给出暂定的 LIO 或轮速推荐并标记需在线验证。
 
 ### 输入
 
@@ -921,9 +922,9 @@ P1 `gps` 只有在两种 P0 都不适用且路线沿途有持续开阔的证据�
 
 - 模型 Schema 没有 `bbox`、`degradation_type`、`union_polygon` 字段且禁止额外字段，`region_id` 按请求绑定为常量。`bbox`、`degradation_type`、`union_polygon`、`source_patch_ids` 按 `region_id` 从 Node 8 结果原样补回。
 - Python 再次校验 Schema，并拒绝空白文本、未被否定的过度承诺用语（如“保证定位”“绝对可靠”，`rule.yaml` 的 `program.overclaim_phrases`）和可靠性数值（百分比、概率、评分，`program.reliability_number_patterns`）。三种方式只做定性比较。
-- `assessment` 记录模型对两项 P0、沿途开阔程度、遮挡或反射线索的判断。只有两项 P0 为 `unsuitable`、`sky_view=open` 且 `obstruction_or_reflection=absent` 才接收 GPS。证据不足的 P0 暂定结果需标记验证和人工复查。
+- `assessment` 记录模型对沿路三维结构疏密（`structure_density`）、LIO 和轮速适用性、沿途开阔程度、遮挡或反射线索的判断。`structure_density=dense` 或 LIO 为 `suitable` 时必须优先选择 LIO，不得改选轮速或 GPS。只有 LIO 和轮速均为 `unsuitable`、`sky_view=open` 且 `obstruction_or_reflection=absent` 才接收 GPS。证据不足的暂定结果需标记需在线验证。
 - 各方式的通用限制（GPS 需验证实时信号、LiDAR 需在线验证匹配约束、轮速 IMU 累积漂移和短时使用）由程序附加到 `limitations`。
-- `wheel_imu_odometry` 或 `review_required=true` 时，`recommendation_status` 强制为 `requires_validation`。程序只收紧状态、只增加限制，不改模型选择的方式。
+- `wheel_imu_odometry` 时，`recommendation_status` 强制为 `requires_validation`。程序只收紧状态、只增加限制，不改模型选择的方式。
 
 ### 无效输出
 
@@ -936,19 +937,18 @@ JSON、Schema 或规则校验失败时，把错误信息反馈给模型重试；
 ```json
 {
   "coordinate_system": "global_pixel",
-  "schema_version": 2,
+  "schema_version": 4,
   "regions": [
     {
       "region_id": "Merged_1",
       "degradation_type": "degradation",
       "bbox": [770, 9104, 2370, 10704],
       "recommended_method": "lidar_inertial_slam",
-      "assessment": {"lidar_inertial_slam": "suitable", "wheel_imu_odometry": "uncertain", "sky_view": "obstructed", "obstruction_or_reflection": "present"},
+      "assessment": {"structure_density": "dense", "lidar_inertial_slam": "suitable", "wheel_imu_odometry": "uncertain", "sky_view": "obstructed", "obstruction_or_reflection": "present"},
       "reason": "道路两侧可见连续建筑与路缘，可能提供几何约束，且树冠使 GPS 存在遮挡风险。",
       "visual_evidence": ["道路两侧可见连续建筑", "存在清晰的路缘线"],
       "limitations": ["北侧树冠可能遮挡部分结构", "卫星影像只提供三维结构的间接线索，需确认车载 LiDAR 实际能观测到相应结构，并在线验证匹配约束是否充分"],
       "recommendation_status": "requires_validation",
-      "review_required": false,
       "union_polygon": {"type": "Polygon", "coordinates": []},
       "source_patch_ids": ["E0_B1_semantic"]
     }
@@ -958,6 +958,11 @@ JSON、Schema 或规则校验失败时，把错误信息反馈给模型重试；
 ```
 
 上面的取值只是结构示例。State 与 `extensions.localization_recommendation` 存摘要：`status`（completed/partial/dry_run）、`method_counts`、`regions`（不含几何轮廓和文本）、`failed_region_ids`、`errors`；路径写入 `files.localization_recommendations`、`files.localization_recommendation_overview`。重跑 Node 8 后需要重跑 Node 9。
+
+- `feature_semantic_max_road_pct`（默认 `15`）、`feature_semantic_min_plant_pct`（默认 `65`）、`feature_semantic_min_clutter_pct`（默认 `85`）：语义初筛条件为 `road < max_road` 且（`plant > min_plant` 或 `plant + building > min_clutter`）。
+- `vlm_review_max_retries`（默认 `1`）：Node 6 发生 `VLMError`、JSON 解析或 Schema 校验失败时的重试次数。
+- Node 7 对贴近图像边界的块支持向图像内侧平移扩展（`inward_window`），不再仅因贴边裁剪而停在基准尺寸。
+- Node 9 独立重跑入口：`.venv/bin/python -m agent.map_preprocess.run_localization_recommendation --manifest <manifest.json> [--dry-run]`。
 
 配置：`vlm_localization_enabled`（`pipeline.yaml` 开启，需 `degradation_fusion_enabled`）、`vlm_localization_image_px`（1024）、`vlm_localization_reasoning_effort`（正式配置 medium）、`vlm_localization_thinking_budget`（正式配置 2048）、`vlm_localization_max_tokens`（4096）、`vlm_localization_workers`（2）、`vlm_localization_max_retries`（1）、`vlm_localization_dry_run`（只渲染输入和 prompt，不调用 VLM、不改 manifest）。
 

@@ -23,7 +23,7 @@
 ## 感知模型
 
 - 按模型隔离：`percection_tool/magroad/`、`segearth_ov3/`、`depth_anything/` 各自保存推理代码、第三方源码和权重。不要把适配器或权重混放到公共目录。公共层只有 interfaces、factory、dummy，factory 延迟导入所选模型。
-- MaGRoad（`segmenter: magroad_scene`）使用官方推理代码和经过 SHA256 校验的权重，Node 1b 按场景选择权重。保持 `strict=True` 加载、float32 推理和官方滑窗平均融合。模型输出的图经 degree-2 链压缩后再布块，几何交叉不能自动当成路口；拓扑定稿后，路线沿 SegEarth-OV3 road 类的中线走。
+- MaGRoad（`segmenter: magroad_scene`）使用官方推理代码和经过 SHA256 校验的权重，Node 1b 按场景选择权重。保持 `strict=True` 加载、float32 推理和官方滑窗平均融合。模型输出的图经 degree-2 链压缩后再布块，几何交叉不能自动当成路口；默认掩码拓扑只用 MaGRoad 概率及原图有效范围。Node 6 只判断退化证据。
 - KITTI 使用 `input_geo_img/` 下的 `kitti_0930_0033.tif`、`kitti_1003_0027.tif`、`kitti_1003_0034.tif`，配置都是 `pipeline.yaml`。这些图的 EPSG:4326/affine 对应约 0.05 m/px，必须保留 `resolution_source=geotiff` 和原图像素网格。
 - 旧 PathFinder 流程已删除，不要恢复。
 
@@ -43,18 +43,20 @@
 
   每套由 prompt.md（任务与输入含义）、skill.md（观察步骤）、rule.yaml（判据与程序映射）、schema.json（输出结构）组成。Node 7 复用 Node 6 的核心 rule 和判定字段。
 
-## 退化分析分支（待实现）
+## 退化分析分支
 
-- 计划为 `agent/run_agent.sh` 增加 `--analysis {auto,semantic,height,both}`。命令示例见根目录 [README](README.md#语义与高程分析模式拟新增)。
+- `agent/run_agent.sh` 支持 `--analysis {auto,semantic,height,both}`。命令示例见根目录 [README](README.md#语义与高程分析模式)。
 - `auto` 为默认值，沿用有 DSM 走高程、无 DSM 走语义的逻辑。`semantic` 只判语义；`height` 和 `both` 需要可用 DSM，支持自动配对及显式 `--dsm`。
-- Node 5 对所选分支各自执行现有初筛规则。Node 6 仅为命中分支构造输入并独立请求 VLM。同一块同时命中时使用两套输入和 prompt。Node 7 只扩展 Node 6 确认退化的分支。
+- Node 5 对所选分支各自执行现有初筛规则。Node 6 为命中分支构造输入并独立请求 VLM；有有效 DSM 且基准无效或道路中心向上阶跃时也送高程复核。同一块同时命中时使用两套输入和 prompt。Node 7 只扩展 Node 6 确认退化的分支。
+
+Node 5 优先用语义道路估计路面高程。后备掩码由 Node 3 在原图网格保存，去除遮挡补桥新增像元。依次尝试中心 5、10、20 m 方窗，每档先用语义道路，失败后按清洗道路掩码和有效 DSM 补选。
 
 ## VLM 输入图与介绍（Node 6 / Node 7）
 
 - 模型只收到“图片 + 图片介绍”：
   - 介绍里写清每张图是什么、覆盖多大范围、颜色和透明度代表什么；
   - 统计值、参考高程、坐标等数据只写进 `<type>_metadata.json`，不发给模型；
-  - 模型不知道 Node 5 的初筛结论。
+  - 模型不知道 Node 5 的初筛结论；道路中心向上阶跃时，Node 6 高程图说明附一条遮挡、隧道或建筑占路的核查提示。
 - 输入图上不画道路拓扑线。Node 6 的局部图不加任何标记；Node 7 只画观察中心十字和档位框。
 - 图片介绍由程序生成：`nodes/vlm_review.py` 中的 `model_input`、`color_description`、`DSM_DESCRIPTION`，以及 `nodes/vlm_expansion.py` 中的 `model_input`。prompt.md 的“输入”一节只写通用说明。
 - 修改输入图时，下面几处要一起改，保持一致：
